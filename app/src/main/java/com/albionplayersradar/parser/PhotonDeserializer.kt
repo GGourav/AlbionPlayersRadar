@@ -6,269 +6,311 @@ object PhotonDeserializer {
 
     private const val TAG = "PhotonDeserializer"
 
-    // Photon Protocol18 type codes
-    private const val TYPE_NULL = 8
-    private const val TYPE_BOOL_FALSE = 27
-    private const val TYPE_BOOL_TRUE = 28
-    private const val TYPE_SHORT_ZERO = 29
-    private const val TYPE_INT_ZERO = 30
-    private const val TYPE_LONG_ZERO = 31
-    private const val TYPE_FLOAT_ZERO = 32
-    private const val TYPE_DOUBLE_ZERO = 33
-    private const val TYPE_BYTE_ZERO = 34
-    private const val TYPE_ARRAY = 0x40
+    data class PhotonHeader(
+        val peerId: Int,
+        val flags: Int,
+        val commandCount: Int,
+        val timestamp: Long,
+        val challenge: Long
+    )
 
-    private const val PHOTON_HEADER_LEN = 12
-    private const val CMD_HEADER_LEN = 12
+    data class Command(
+        val cmdType: Int,
+        val channelId: Int,
+        val flags: Int,
+        val length: Int,
+        val sequenceNumber: Int,
+        val payload: ByteArray
+    )
+
+    data class EventData(
+        val code: Int,
+        val params: Map<Byte, Any>
+    )
+
+    data class ParseResult(
+        val events: List<EventData>,
+        val requests: List<OperationRequest>,
+        val responses: List<OperationResponse>
+    )
+
+    data class OperationRequest(
+        val opCode: Int,
+        val params: Map<Byte, Any>
+    )
+
+    data class OperationResponse(
+        val opCode: Int,
+        val returnCode: Int,
+        val params: Map<Byte, Any>
+    )
+
     private const val CMD_DISCONNECT = 4
-    private const val CMD_SEND_RELIABLE = 6
     private const val CMD_SEND_UNRELIABLE = 7
-    private const val CMD_FRAGMENT = 8
+    private const val CMD_SEND_RELIABLE = 6
     private const val MSG_REQUEST = 2
     private const val MSG_RESPONSE = 3
     private const val MSG_EVENT = 4
 
-    data class PacketResult(
-        val events: MutableList<EventData> = mutableListOf(),
-        val requests: MutableList<RequestData> = mutableListOf(),
-        val responses: MutableList<ResponseData> = mutableListOf()
-    )
+    fun parsePacket(data: ByteArray): ParseResult {
+        val events = mutableListOf<EventData>()
+        val requests = mutableListOf<OperationRequest>()
+        val responses = mutableListOf<OperationResponse>()
 
-    data class EventData(val code: Int, val params: Map<Int, Any?>)
-    data class RequestData(val code: Int, val params: Map<Int, Any?>)
-    data class ResponseData(val code: Int, val returnCode: Int, val params: Map<Int, Any?>)
+        try {
+            if (data.size < 12) return ParseResult(events, requests, responses)
 
-    fun parsePacket(payload: ByteArray): PacketResult {
-        val result = PacketResult()
-        if (payload.size < PHOTON_HEADER_LEN) return result
-        var offset = 0
-        offset += 2 // peerId
-        val flags = payload[offset].toInt() and 0xFF; offset++
-        if (payload.size < offset + 1) return result
-        val cmdCount = payload[offset].toInt() and 0xFF; offset++
-        offset += 8 // timestamp + challenge
-        if (flags == 1) return result
+            val peerId = intFromBytes(data[0], data[1], data[2], data[3])
+            val flags = data[4].toInt() and 0xFF
+            val commandCount = data[5].toInt() and 0xFF
+            val timestamp = intFromBytes(data[6], data[7], data[8], data[9]).toLong() and 0xFFFFFFFFL
+            val challenge = intFromBytes(data[10], data[11], data[12], data[13]).toLong() and 0xFFFFFFFFL
 
-        for (i in 0 until cmdCount) {
-            if (offset + CMD_HEADER_LEN > payload.size) break
-            offset += 4 // cmdType + channelId
-            val cmdLen = readUInt(payload, offset).toInt(); offset += 4
-            offset += 4 // sequence number
-            val pLen = cmdLen - CMD_HEADER_LEN
-            if (pLen < 0 || offset + pLen > payload.size) break
-            val cmdType = payload[offset - CMD_HEADER_LEN - 4].toInt()
+            if (flags and 1 != 0) return ParseResult(events, requests, responses) // encrypted
 
-            when (cmdType) {
-                CMD_DISCONNECT -> { offset += pLen }
-                CMD_SEND_UNRELIABLE -> { if (pLen >= 4) { offset += 4; parseMessage(payload, offset, pLen - 4, result) } else offset += pLen }
-                CMD_SEND_RELIABLE -> { parseMessage(payload, offset, pLen, result); offset += pLen }
-                CMD_FRAGMENT -> { offset += pLen }
-                else -> offset += pLen
+            var offset = 14
+            repeat(commandCount) {
+                if (offset + 12 > data.size) return@repeat
+                val cmdType = data[offset].toInt() and 0xFF
+                val channelId = data[offset + 1].toInt() and 0xFF
+                val cmdFlags = data[offset + 2].toInt() and 0xFF
+                offset += 4
+                val cmdLen = intFromBytes(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
+                offset += 4
+                val seqNum = intFromBytes(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
+                offset += 4
+                val payloadLen = cmdLen - 12
+                if (payloadLen < 0 || offset + payloadLen > data.size) return@repeat
+
+                when (cmdType) {
+                    CMD_DISCONNECT -> { }
+                    CMD_SEND_UNRELIABLE -> {
+                        if (payloadLen > 4) {
+                            val payload = data.copyOfRange(offset + 4, offset + payloadLen)
+                            parseMessage(payload, events, requests, responses)
+                        }
+                    }
+                    CMD_SEND_RELIABLE -> {
+                        if (payloadLen > 2) {
+                            val payload = data.copyOfRange(offset + 2, offset + payloadLen)
+                            parseMessage(payload, events, requests, responses)
+                        }
+                    }
+                }
+                offset += payloadLen
             }
+        } catch (e: Exception) {
+            Log.e(TAG, "Parse error: ${e.message}")
         }
-        return result
+        return ParseResult(events, requests, responses)
     }
 
-    private fun parseMessage(data: ByteArray, offset: Int, len: Int, result: PacketResult) {
-        if (len < 2 || offset >= data.size) return
-        val sig = data[offset]; offset++
-        val msgType = data[offset]; offset++
-        val msgData = data.copyOfRange(offset, minOf(offset + len - 2, data.size))
-        val buf = msgData.inputStream()
-
-        when (msgType.toInt()) {
-            MSG_REQUEST -> {
-                val opCode = buf.read()
-                val params = readParams(buf)
-                result.requests.add(RequestData(opCode, params))
-            }
-            MSG_RESPONSE, 7 -> {
-                val opCode = buf.read()
-                val retCode = if (buf.available() >= 2) readUShortFromBuf(buf).toInt() else 0
-                val params = readParams(buf)
-                result.responses.add(ResponseData(opCode, retCode, params))
-            }
+    private fun parseMessage(payload: ByteArray, events: MutableList<EventData>, requests: MutableList<OperationRequest>, responses: MutableList<OperationResponse>) {
+        if (payload.size < 2) return
+        val msgType = payload[0].toInt() and 0xFF
+        val data = payload.copyOfRange(1, payload.size)
+        when (msgType) {
             MSG_EVENT -> {
-                val code = buf.read()
-                val params = readParams(buf)
-                result.events.add(EventData(code, params))
+                val event = parseEventData(data)
+                if (event != null) events.add(event)
+            }
+            MSG_REQUEST -> {
+                val req = parseRequest(data)
+                if (req != null) requests.add(req)
+            }
+            MSG_RESPONSE -> {
+                val resp = parseResponse(data)
+                if (resp != null) responses.add(resp)
             }
         }
     }
 
-    private fun readParams(buf: java.io.ByteArrayInputStream): Map<Int, Any?> {
-        val params = mutableMapOf<Int, Any?>()
-        val count = readVarInt(buf).toInt()
-        repeat(count) {
-            val key = buf.read()
-            val value = readValue(buf)
-            params[key] = value
+    fun parseEventData(data: ByteArray): EventData? {
+        try {
+            if (data.isEmpty()) return null
+            val code = data[0].toInt() and 0xFF
+            val params = mutableMapOf<Byte, Any>()
+            var offset = 1
+            val count = readUInt8(data, offset); offset++
+            repeat(count) {
+                if (offset >= data.size) return@repeat
+                val key = data[offset].toByte(); offset++
+                if (offset >= data.size) return@repeat
+                val (value, newOffset) = readValue(data, offset)
+                params[key] = value
+                offset = newOffset
+            }
+            return EventData(code, params)
+        } catch (e: Exception) {
+            return null
         }
-        return params
     }
 
-    private fun readValue(buf: java.io.ByteArrayInputStream): Any? {
-        if (buf.available() == 0) return null
-        val typeCode = buf.read()
+    private fun parseRequest(data: ByteArray): OperationRequest? {
+        try {
+            if (data.size < 2) return null
+            val opCode = data[0].toInt() and 0xFF
+            val params = mutableMapOf<Byte, Any>()
+            var offset = 1
+            val count = readUInt8(data, offset); offset++
+            repeat(count) {
+                if (offset >= data.size) return@repeat
+                val key = data[offset].toByte(); offset++
+                if (offset >= data.size) return@repeat
+                val (value, newOffset) = readValue(data, offset)
+                params[key] = value
+                offset = newOffset
+            }
+            return OperationRequest(opCode, params)
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun parseResponse(data: ByteArray): OperationResponse? {
+        try {
+            if (data.size < 3) return null
+            val opCode = data[0].toInt() and 0xFF
+            val returnCode = intFromBytes(data[1], data[2], 0, 0)
+            val params = mutableMapOf<Byte, Any>()
+            var offset = 3
+            val count = readUInt8(data, offset); offset++
+            repeat(count) {
+                if (offset >= data.size) return@repeat
+                val key = data[offset].toByte(); offset++
+                if (offset >= data.size) return@repeat
+                val (value, newOffset) = readValue(data, offset)
+                params[key] = value
+                offset = newOffset
+            }
+            return OperationResponse(opCode, returnCode, params)
+        } catch (e: Exception) {
+            return null
+        }
+    }
+
+    private fun readValue(data: ByteArray, offset: Int): Pair<Any, Int> {
+        if (offset >= data.size) return Pair(Unit, offset)
+        val typeCode = data[offset].toInt() and 0xFF
         return when (typeCode) {
-            TYPE_NULL -> null
-            TYPE_BOOL_FALSE -> false
-            TYPE_BOOL_TRUE -> true
-            2 -> buf.read() != 0
-            3 -> buf.read().toByte()
-            4 -> readShort(buf)
-            5 -> java.lang.Float.intBitsToFloat(readUIntFromBuf(buf).toInt())
-            6 -> java.lang.Double.longBitsToDouble(readULongFromBuf(buf))
-            7 -> readString(buf)
-            9 -> readVarInt(buf).toInt()
-            11 -> buf.read().toByte().toInt()
-            12 -> -buf.read().toByte().toInt()
-            13 -> readUShortFromBuf(buf).toInt()
-            14 -> -readUShortFromBuf(buf).toInt()
-            10 -> readVarLong(buf)
-            15 -> buf.read().toLong()
-            16 -> -buf.read().toLong()
-            17 -> readUShortFromBuf(buf).toLong()
-            18 -> -readUShortFromBuf(buf).toLong()
-            30 -> 0
-            31 -> 0L
-            32 -> 0f
-            33 -> 0.0
-            34 -> 0.toByte()
-            67 -> readByteArray(buf)
-            23 -> readObjectArray(buf)
-            21 -> readHashtable(buf)
+            0 -> Pair(null, offset + 1)
+            2 -> Pair(data[offset + 1].toInt() != 0, offset + 2)
+            3 -> Pair(data[offset + 1].toInt() and 0xFF, offset + 2)
+            4 -> {
+                val v = intFromBytes(data[offset + 1], data[offset + 2], 0, 0).toShort()
+                Pair(v, offset + 3)
+            }
+            5 -> {
+                val bits = intFromBytes(data[offset + 1], data[offset + 2], data[offset + 3], data[offset + 4])
+                Pair(Float.fromBits(bits), offset + 5)
+            }
+            7 -> {
+                val len = readUInt16(data, offset + 1)
+                val end = offset + 1 + 2 + len
+                if (end > data.size) Pair("", offset + 1)
+                else {
+                    val str = String(data, offset + 3, len, Charsets.UTF_8)
+                    Pair(str, end)
+                }
+            }
+            9 -> {
+                val (v, end) = readCompressedInt(data, offset + 1)
+                Pair(v, end)
+            }
+            11 -> Pair(data[offset + 1].toInt() and 0xFF, offset + 2)
+            12 -> Pair(-(data[offset + 1].toInt() and 0xFF), offset + 2)
+            13 -> Pair(readUInt16(data, offset + 1), offset + 3)
+            14 -> Pair(-readUInt16(data, offset + 1), offset + 3)
+            21 -> {
+                val count = readUInt16(data, offset + 1)
+                val map = mutableMapOf<Any, Any>()
+                var p = offset + 3
+                repeat(count) {
+                    if (p >= data.size) return@repeat
+                    val (key, p2) = readValue(data, p)
+                    if (p2 >= data.size) return@repeat
+                    val (value, p3) = readValue(data, p2)
+                    map[key] = value
+                    p = p3
+                }
+                Pair(map, offset + 3 + count * 2)
+            }
+            27 -> Pair(false, offset + 1)
+            28 -> Pair(true, offset + 1)
+            29 -> Pair(0.toShort(), offset + 1)
+            30 -> Pair(0, offset + 1)
+            31 -> Pair(0L, offset + 1)
+            67 -> {
+                val len = readUInt16(data, offset + 1)
+                val end = offset + 3 + len
+                if (end > data.size) Pair(byteArrayOf(), offset + 3)
+                else Pair(data.copyOfRange(offset + 3, end), end)
+            }
             else -> {
-                if (typeCode and TYPE_ARRAY == TYPE_ARRAY) readTypedArray(buf, typeCode and 0x3F)
-                else null
+                if (typeCode and 0x40 != 0) {
+                    val elemType = typeCode and 0x3F
+                    val len = readUInt16(data, offset + 1)
+                    val list = mutableListOf<Any>()
+                    var p = offset + 3
+                    repeat(len) {
+                        if (p >= data.size) return@repeat
+                        val (v, np) = readPrimitive(elemType, data, p)
+                        list.add(v); p = np
+                    }
+                    Pair(list, p)
+                } else {
+                    Pair(Unit, offset + 1)
+                }
             }
         }
     }
 
-    private fun readVarInt(buf: java.io.ByteArrayInputStream): Long {
-        var result = 0L
+    private fun readPrimitive(type: Int, data: ByteArray, offset: Int): Pair<Any, Int> {
+        return when (type) {
+            2 -> Pair(data[offset].toInt() != 0, offset + 1)
+            3 -> Pair(data[offset].toInt() and 0xFF, offset + 1)
+            4 -> Pair(intFromBytes(data[offset], data[offset + 1], 0, 0).toShort(), offset + 2)
+            5 -> {
+                val bits = intFromBytes(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
+                Pair(Float.fromBits(bits), offset + 4)
+            }
+            7 -> {
+                val len = readUInt16(data, offset)
+                Pair(String(data, offset + 2, len, Charsets.UTF_8), offset + 2 + len)
+            }
+            else -> Pair(Unit, offset + 1)
+        }
+    }
+
+    private fun readUInt8(data: ByteArray, offset: Int): Int {
+        return if (offset < data.size) data[offset].toInt() and 0xFF else 0
+    }
+
+    private fun readUInt16(data: ByteArray, offset: Int): Int {
+        if (offset + 1 >= data.size) return 0
+        return ((data[offset].toInt() and 0xFF)) or ((data[offset + 1].toInt() and 0xFF) shl 8)
+    }
+
+    private fun readCompressedInt(data: ByteArray, offset: Int): Pair<Int, Int> {
+        var result = 0
         var shift = 0
-        while (true) {
-            val b = buf.read().toLong()
+        var pos = offset
+        while (pos < data.size) {
+            val b = data[pos].toInt()
             result = result or ((b and 0x7F) shl shift)
-            if (b and 0x80 == 0L) break
             shift += 7
+            pos++
+            if (b and 0x80 == 0) break
             if (shift >= 35) break
         }
-        return (result shr 1) xor -(result and 1)
+        val decoded = (result ushr 1) xor -(result and 1)
+        return Pair(decoded, pos)
     }
 
-    private fun readVarLong(buf: java.io.ByteArrayInputStream): Long {
-        var result = 0L
-        var shift = 0
-        while (true) {
-            val b = buf.read().toLong()
-            result = result or ((b and 0x7F) shl shift)
-            if (b and 0x80 == 0L) break
-            shift += 7
-            if (shift >= 70) break
-        }
-        return (result shr 1) xor -(result and 1)
-    }
-
-    private fun readString(buf: java.io.ByteArrayInputStream): String {
-        val len = readVarInt(buf).toInt()
-        if (len <= 0 || len > 65536) return ""
-        val bytes = ByteArray(len)
-        var read = 0
-        while (read < len) {
-            val r = buf.read(bytes, read, len - read)
-            if (r < 0) break
-            read += r
-        }
-        return String(bytes, java.nio.charset.StandardCharsets.UTF_8)
-    }
-
-    private fun readByteArray(buf: java.io.ByteArrayInputStream): ByteArray {
-        val len = readVarInt(buf).toInt()
-        if (len <= 0 || len > 65536) return ByteArray(0)
-        val arr = ByteArray(len)
-        var read = 0
-        while (read < len) {
-            val r = buf.read(arr, read, len - read)
-            if (r < 0) break
-            read += r
-        }
-        return arr
-    }
-
-    private fun readObjectArray(buf: java.io.ByteArrayInputStream): List<Any?> {
-        val count = readVarInt(buf).toInt()
-        if (count < 0 || count > 65536) return emptyList()
-        return (0 until count).map { readValue(buf) }
-    }
-
-    private fun readHashtable(buf: java.io.ByteArrayInputStream): Map<Any?, Any?> {
-        val count = readVarInt(buf).toInt()
-        if (count < 0 || count > 65536) return emptyMap()
-        val map = mutableMapOf<Any?, Any?>()
-        repeat(count) {
-            val key = readValue(buf)
-            val value = readValue(buf)
-            if (key != null) map[key] = value
-        }
-        return map
-    }
-
-    private fun readTypedArray(buf: java.io.ByteArrayInputStream, elemType: Int): Any? {
-        val count = readVarInt(buf).toInt()
-        if (count < 0 || count > 65536) return null
-        return when (elemType) {
-            2 -> (0 until count).map { buf.read() != 0 }.toList()
-            3 -> { val a = ByteArray(count); buf.read(a, 0, count); a.toList() }
-            4 -> (0 until count).map { readShort(buf) }.toList()
-            11 -> (0 until count).map { buf.read().toByte().toInt() }.toList()
-            9 -> (0 until count).map { readVarInt(buf).toInt() }.toList()
-            10 -> (0 until count).map { readVarLong(buf) }.toList()
-            5 -> (0 until count).map { java.lang.Float.intBitsToFloat(readUIntFromBuf(buf).toInt()) }.toList()
-            7 -> (0 until count).map { readString(buf) }.toList()
-            else -> null
-        }
-    }
-
-    private fun readShort(buf: java.io.ByteArrayInputStream): Short {
-        val lo = buf.read(); val hi = buf.read()
-        return ((lo and 0xFF) or ((hi and 0xFF) shl 8)).toShort()
-    }
-
-    private fun readUShortFromBuf(buf: java.io.ByteArrayInputStream): Int {
-        val lo = buf.read(); val hi = buf.read()
-        return (lo and 0xFF) or ((hi and 0xFF) shl 8)
-    }
-
-    private fun readUIntFromBuf(buf: java.io.ByteArrayInputStream): Long {
-        var result = 0L
-        var shift = 0
-        while (true) {
-            val b = buf.read().toLong()
-            result = result or ((b and 0x7F) shl shift)
-            if (b and 0x80 == 0L) break
-            shift += 7
-        }
-        return result
-    }
-
-    private fun readULongFromBuf(buf: java.io.ByteArrayInputStream): Long {
-        var result = 0L
-        var shift = 0
-        while (true) {
-            val b = buf.read().toLong()
-            result = result or ((b and 0x7F) shl shift)
-            if (b and 0x80 == 0L) break
-            shift += 7
-        }
-        return result
-    }
-
-    private fun readUInt(data: ByteArray, offset: Int): Long {
-        return ((data[offset].toLong() and 0xFF) or
-                ((data[offset + 1].toLong() and 0xFF) shl 8) or
-                ((data[offset + 2].toLong() and 0xFF) shl 16) or
-                ((data[offset + 3].toLong() and 0xFF) shl 24))
+    private fun intFromBytes(b0: Byte, b1: Byte, b2: Byte, b3: Byte): Int {
+        return ((b0.toInt() and 0xFF)) or
+                ((b1.toInt() and 0xFF) shl 8) or
+                ((b2.toInt() and 0xFF) shl 16) or
+                ((b3.toInt() and 0xFF) shl 24)
     }
 }
