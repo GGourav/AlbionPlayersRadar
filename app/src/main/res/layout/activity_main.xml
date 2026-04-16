@@ -4,31 +4,62 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="16dp"
     android:background="#111111">
 
-    <TextView
-        android:id="@+id/status_text"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Albion Players Radar"
-        android:textColor="#FFFFFF"
-        android:textSize="16sp"
-        android:padding="8dp" />
+        android:orientation="horizontal"
+        android:padding="12dp"
+        android:background="#1a1a1a">
 
-    <Button
-        android:id="@+id/btn_vpn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Start Radar"
-        android:layout_marginTop="8dp" />
+        <Button
+            android:id="@+id/btn_vpn"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Start Radar" />
+
+        <TextView
+            android:id="@+id/tv_zone"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Zone: --"
+            android:textColor="#ffffff"
+            android:layout_marginStart="12dp"
+            android:layout_gravity="center_vertical" />
+
+        <TextView
+            android:id="@+id/tv_count"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Players: 0"
+            android:textColor="#00FF88"
+            android:layout_marginStart="12dp"
+            android:layout_gravity="center_vertical" />
+
+    </LinearLayout>
 
     <FrameLayout
         android:id="@+id/radar_view"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:layout_marginTop="8dp"
-        android:background="#1A1A1A" />
+        android:layout_margin="8dp"
+        android:background="#1a1a2e" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="120dp"
+        android:background="#0d0d0d">
+        <TextView
+            android:id="@+id/tv_log"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="#888888"
+            android:textSize="10sp"
+            android:padding="8dp"
+            android:fontFamily="monospace" />
+    </ScrollView>
 
 </LinearLayout>
