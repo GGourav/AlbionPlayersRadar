@@ -114,7 +114,7 @@ class AlbionVpnService : VpnService() {
         val notification = buildNotification()
 
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
-            startForeground(startId, notification, android.content.pm.ForegroundServiceInfo.IMPLICIT_FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+            startForeground(startId, notification, android.content.pm.ForegroundService.IMPLICIT_FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(startId, notification)
         }
