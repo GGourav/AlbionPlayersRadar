@@ -14,7 +14,8 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.net.VpnService
 import android.os.Bundle
-import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.view.View
 import android.widget.Button
 import android.widget.FrameLayout
@@ -25,31 +26,43 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.albionplayersradar.R
 import com.albionplayersradar.parser.EventRouter
-import com.albionplayersradar.parser.PhotonPacketParser
 import com.albionplayersradar.vpn.AlbionVpnService
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 class MainActivity : AppCompatActivity(), EventRouter.PlayerListener {
 
+    private val players = mutableListOf<Player>()
     private var vpnService: AlbionVpnService? = null
     private var vpnBound = false
     private var radarView: RadarView? = null
     private var vpnButton: Button? = null
-    private var statusText: TextView? = null
+    private var tvPlayerCount: TextView? = null
+    private var tvZone: TextView? = null
+    private var isVpnRunning = false
 
-    private val serviceConnection = object : ServiceConnection {
+    private val handler = Handler(Looper.getMainLooper())
+    private var refreshRunnable: Runnable? = null
+
+    private val vpnConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
-            val binder = service as? AlbionVpnService.LocalBinder
-            vpnService = binder?.getService()
+            val binder = service as AlbionVpnService.LocalBinder
+            vpnService = binder.getService()
             vpnBound = true
-            vpnService?.setPlayerListener(this@MainActivity)
+            vpnService?.eventRouter?.setPlayerListener(this@MainActivity)
+            updateVpnButton()
         }
+
         override fun onServiceDisconnected(name: ComponentName?) {
-            vpnService = null
             vpnBound = false
+            vpnService = null
         }
     }
 
-    private val vpnPermissionLauncher = registerForActivityResult(
+    private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == RESULT_OK) {
@@ -61,24 +74,44 @@ class MainActivity : AppCompatActivity(), EventRouter.PlayerListener {
         super.onCreate(savedInstanceState)
         createNotificationChannel()
         setContentView(R.layout.activity_main)
+        setupViews()
+    }
 
+    private fun createNotificationChannel() {
+        val channel = NotificationChannel("radar_channel", "Albion Radar", NotificationManager.IMPORTANCE_LOW)
+        val manager = getSystemService(NotificationManager::class.java)
+        manager.createNotificationChannel(channel)
+    }
+
+    private fun setupViews() {
         vpnButton = findViewById(R.id.btn_vpn)
-        statusText = findViewById(R.id.status_text)
-        radarView = findViewById(R.id.radar_view)
+        tvPlayerCount = findViewById(R.id.tv_player_count)
+        tvZone = findViewById(R.id.tv_zone)
+
+        val container = findViewById<FrameLayout>(R.id.radar_container)
+
+        radarView = RadarView(this)
+        container.addView(radarView)
 
         vpnButton?.setOnClickListener { toggleVpn() }
-        updateStatus("Tap button to start radar")
+        findViewById<Button>(R.id.btn_clear)?.setOnClickListener { clearPlayers() }
+
+        refreshRunnable = object : Runnable {
+            override fun run() {
+                radarView?.invalidate()
+                handler.postDelayed(this, 100)
+            }
+        }
+        handler.post(refreshRunnable!!)
     }
 
     private fun toggleVpn() {
-        if (vpnBound) {
-            vpnService?.stopVpn()
-            vpnBound = false
-            updateStatus("VPN stopped")
+        if (isVpnRunning) {
+            stopVpnService()
         } else {
             val intent = VpnService.prepare(this)
             if (intent != null) {
-                vpnPermissionLauncher.launch(intent)
+                permissionLauncher.launch(intent)
             } else {
                 startVpnService()
             }
@@ -87,145 +120,139 @@ class MainActivity : AppCompatActivity(), EventRouter.PlayerListener {
 
     private fun startVpnService() {
         val intent = Intent(this, AlbionVpnService::class.java)
-        startForegroundService(intent)
-        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
-        vpnService?.setPlayerListener(this)
-        updateStatus("VPN started — connecting...")
+        startService(intent)
+        bindService(Intent(this, AlbionVpnService::class.java), vpnConnection, Context.BIND_AUTO_CREATE)
+        isVpnRunning = true
+        updateVpnButton()
     }
 
-    private fun createNotificationChannel() {
-        val channel = NotificationChannel(
-            CHANNEL_ID,
-            "Albion Radar",
-            NotificationManager.IMPORTANCE_LOW
+    private fun stopVpnService() {
+        vpnService?.stopRun()
+        if (vpnBound) {
+            unbindService(vpnConnection)
+            vpnBound = false
+        }
+        stopService(Intent(this, AlbionVpnService::class.java))
+        isVpnRunning = false
+        updateVpnButton()
+    }
+
+    private fun updateVpnButton() {
+        vpnButton?.text = if (isVpnRunning) "Stop VPN" else "Start VPN"
+        vpnButton?.setBackgroundColor(
+            if (isVpnRunning) Color.parseColor("#EF4444") else Color.parseColor("#10B981")
         )
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(channel)
     }
 
-    private fun updateStatus(msg: String) {
-        runOnUiThread { statusText?.text = msg }
+    private fun clearPlayers() {
+        players.clear()
+        radarView?.invalidate()
+        tvPlayerCount?.text = "Players: 0"
     }
 
-    override fun onPlayerJoined(id: Long, name: String, guild: String, posX: Float, posY: Float, faction: Int) {
-        radarView?.addPlayer(id, name, guild, posX, posY, faction)
+    override fun onPlayerJoined(id: Long, name: String, guild: String, posX: Float, posY: Float, posZ: Float, faction: Int) {
         runOnUiThread {
-            statusText?.text = "Players: ${radarView?.playerCount ?: 0}"
+            val p = Player(id.toInt(), name, guild, faction, posX, posY)
+            players.removeAll { it.id == p.id }
+            players.add(p)
+            radarView?.invalidate()
+            tvPlayerCount?.text = "Players: ${players.size}"
         }
     }
 
     override fun onPlayerLeft(id: Long) {
-        radarView?.removePlayer(id)
+        runOnUiThread {
+            players.removeAll { it.id == id.toInt() }
+            radarView?.invalidate()
+            tvPlayerCount?.text = "Players: ${players.size}"
+        }
     }
 
-    override fun onPlayerMoved(id: Long, posX: Float, posY: Float) {
-        radarView?.updatePlayer(id, posX, posY)
+    override fun onPlayerMoved(id: Long, posX: Float, posY: Float, posZ: Float) {
+        runOnUiThread {
+            players.find { it.id == id.toInt() }?.apply {
+                this.posX = posX
+                this.posY = posY
+            }
+            radarView?.invalidate()
+        }
     }
 
-    override fun onPlayerHealthChanged(id: Long, currentHp: Float, maxHp: Float) {
-        radarView?.updateHealth(id, currentHp, maxHp)
-    }
+    override fun onPlayerHealthChanged(id: Long, currentHp: Float, maxHp: Float) {}
 
     override fun onDestroy() {
         super.onDestroy()
+        refreshRunnable?.let { handler.removeCallbacks(it) }
         if (vpnBound) {
-            unbindService(serviceConnection)
+            unbindService(vpnConnection)
             vpnBound = false
         }
     }
 
-    class RadarView @JvmOverloads constructor(
-        context: Context,
-        attrs: android.util.AttributeSet? = null
-    ) : View(context, attrs) {
-
-        private val players = mutableMapOf<Long, PlayerDot>()
-        private val playerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    inner class RadarView(context: Context?) : View(context) {
+        private val paint = Paint().apply {
+            isAntiAlias = true
+            style = Paint.Style.FILL
+        }
+        private val textPaint = Paint().apply {
             color = Color.WHITE
-            textSize = 28f
+            textSize = 24f
+            textAlign = Paint.Align.CENTER
         }
-        private val localPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.YELLOW
+        private val circlePaint = Paint().apply {
+            isAntiAlias = true
             style = Paint.Style.STROKE
-            strokeWidth = 4f
+            strokeWidth = 3f
         }
 
-        var localX = 0f
-        var localY = 0f
-        val playerCount: Int get() = players.size
-
-        data class PlayerDot(
-            var name: String,
-            var guild: String,
-            var x: Float,
-            var y: Float,
-            var faction: Int
-        )
-
-        fun addPlayer(id: Long, name: String, guild: String, x: Float, y: Float, faction: Int) {
-            players[id] = PlayerDot(name, guild, x, y, faction)
-            invalidate()
-        }
-
-        fun removePlayer(id: Long) {
-            players.remove(id)
-            invalidate()
-        }
-
-        fun updatePlayer(id: Long, x: Float, y: Float) {
-            players[id]?.let {
-                it.x = x
-                it.y = y
-                invalidate()
-            }
-        }
-
-        fun updateHealth(id: Long, currentHp: Float, maxHp: Float) {
-            invalidate()
-        }
+        private val scale = 30f
+        private val radarRadius = 280f
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
+            canvas.drawColor(Color.parseColor("#1a1a2e"))
+
             val cx = width / 2f
             val cy = height / 2f
-            val scale = 50f
 
-            // Draw local player ring
-            canvas.drawCircle(cx, cy, 20f, localPaint)
+            circlePaint.color = Color.parseColor("#333366")
+            canvas.drawCircle(cx, cy, radarRadius, circlePaint)
+            canvas.drawCircle(cx, cy, radarRadius / 2, circlePaint)
+            canvas.drawLine(cx - radarRadius, cy, cx + radarRadius, cy, circlePaint)
+            canvas.drawLine(cx, cy - radarRadius, cx, cy + radarRadius, circlePaint)
 
-            // Draw grid
-            val gridPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.argb(40, 255, 255, 255)
-                strokeWidth = 1f
-                style = Paint.Style.STROKE
-            }
-            for (r in 50..(minOf(width, height) / 2) step 50) {
-                canvas.drawCircle(cx, cy, r.toFloat(), gridPaint)
-            }
+            paint.color = Color.parseColor("#10B981")
+            canvas.drawCircle(cx, cy, 8f, paint)
 
-            // Draw players
-            players.forEach { (_, player) ->
-                val dx = (player.x - localX) * scale
-                val dy = (player.y - localY) * scale
-                val px = cx + dx
-                val py = cy - dy
+            for (player in players) {
+                val dx = player.posX / scale
+                val dy = player.posY / scale
 
-                if (px < 0 || px > width || py < 0 || py > height) return@forEach
+                val sx = cx + dx
+                val sy = cy - dy
+
+                if (abs(sx - cx) > radarRadius || abs(sy - cy) > radarRadius) continue
 
                 val color = when {
-                    player.faction == 255 -> Color.RED
-                    player.faction in 1..6 -> Color.rgb(255, 165, 0)
-                    else -> Color.rgb(0, 255, 136)
+                    player.faction == 255 -> Color.parseColor("#EF4444")
+                    player.faction in 1..6 -> Color.parseColor("#F59E0B")
+                    else -> Color.parseColor("#3B82F6")
                 }
-                playerPaint.color = color
-                canvas.drawCircle(px, py, 12f, playerPaint)
-                canvas.drawText(player.name.take(8), px + 14, py + 8, textPaint)
+                paint.color = color
+                canvas.drawCircle(sx, sy, 10f, paint)
+
+                textPaint.color = Color.WHITE
+                canvas.drawText(player.name, sx, sy - 14f, textPaint)
             }
         }
     }
 
-    companion object {
-        const val CHANNEL_ID = "albion_radar_channel"
-    }
+    data class Player(
+        val id: Int,
+        val name: String,
+        val guild: String,
+        val faction: Int,
+        var posX: Float = 0f,
+        var posY: Float = 0f
+    )
 }
