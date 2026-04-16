@@ -1,6 +1,7 @@
 package com.albionplayersradar.vpn
 
 import android.app.Notification
+import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
@@ -14,7 +15,6 @@ import com.albionplayersradar.ui.MainActivity
 import java.io.FileDescriptor
 import java.net.DatagramPacket
 import java.net.DatagramSocket
-import java.net.InetAddress
 
 class AlbionVpnService : Service(), EventRouter.PlayerListener {
 
@@ -22,24 +22,19 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
     private var readerThread: Thread? = null
     private var proxySocket: DatagramSocket? = null
     private var tunFd: FileDescriptor? = null
-    private var eventRouter: EventRouter? = null
+    private val eventRouter = EventRouter
 
-    private val PHOTON_PORT = 5056
-    private val SERVER_IP = "5.45.187.219"
-    private val SERVER_PORT = 5056
+    private val binder = LocalBinder()
 
     inner class LocalBinder : Binder() {
         fun getService(): AlbionVpnService = this@AlbionVpnService
     }
 
-    private val binder = LocalBinder()
-
     override fun onBind(intent: Intent): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
-        eventRouter = EventRouter()
-        eventRouter?.setPlayerListener(this)
+        eventRouter.setPlayerListener(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -56,7 +51,7 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
         return NotificationCompat.Builder(this, "albion_vpn")
             .setContentTitle("Albion Players Radar")
             .setContentText(text)
-            .setSmallIcon(R.drawable.ic_launcher)
+            .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pendingIntent)
             .build()
     }
@@ -67,10 +62,11 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
 
         val prepare = VpnService.prepare(this)
         if (prepare != null) {
+            running = false
             return
         }
 
-        val builder = Builder()
+        val builder = VpnService.Builder()
         builder.setMtu(2048)
         builder.addAddress("10.0.0.2", 32)
         builder.addRoute("0.0.0.0", 0)
@@ -82,7 +78,7 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
             val vpnInterface = builder.establish()
             if (vpnInterface != null) {
                 tunFd = vpnInterface
-                proxySocket = DatagramSocket(PHOTON_PORT)
+                proxySocket = DatagramSocket(5056)
                 proxySocket?.reuseAddress = true
                 readerThread = Thread { readLoop() }
                 readerThread?.start()
@@ -121,7 +117,7 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
             try {
                 proxySocket?.receive(packet)
                 val data = packet.data.copyOf(packet.length)
-                eventRouter?.onUdpPacketReceived(data)
+                eventRouter.onUdpPacketReceived(data)
             } catch (e: Exception) {
                 if (running) {
                     Log.e("AlbionVpn", "Read error", e)
@@ -130,12 +126,12 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
         }
     }
 
-    fun setPlayerListener(listener: EventRouter.PlayerListener) {
-        eventRouter?.setPlayerListener(listener)
+    fun setPlayerListener(listener: EventRouter.PlayerListener?) {
+        eventRouter.setPlayerListener(listener)
     }
 
     override fun onPlayerJoined(id: Long, name: String, guild: String, posX: Float, posY: Float, posZ: Float, faction: Int) {
-        Log.d("AlbionVpn", "Player: $name [$guild] at ($posX, $posY)")
+        Log.d("AlbionVpn", "Player: $name [$guild] at ($posX, $posY, $posZ)")
     }
 
     override fun onPlayerLeft(id: Long) {}
