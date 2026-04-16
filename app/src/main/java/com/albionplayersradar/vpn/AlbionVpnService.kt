@@ -40,11 +40,11 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
 
     override fun onCreate() {
         super.onCreate()
-        EventRouter.setPlayerListener(this)
+        EventRouter.listener = this
         Log.d(TAG, "Service created")
     }
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId): Int {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForeground(NOTIFY_ID, makeNotification("Starting..."))
         startVpn()
         return START_STICKY
@@ -126,7 +126,7 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
         if (len < 20) return
         val ihl = (buf[0].toInt() and 0x0F) * 4
         if (ihl < 20) return
-        if (buf[9].toInt() and 0xFF != 17) return
+        if (buf[9].toInt() and 0xFF != 17) return // not UDP
 
         val dstPort = ((buf[ihl + 2].toInt() and 0xFF) shl 8) or (buf[ihl + 3].toInt() and 0xFF)
         val payloadOff = ihl + 8
@@ -135,8 +135,10 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
 
         val payload = buf.copyOfRange(payloadOff, payloadOff + payloadLen)
 
-        EventRouter.onUdpPacketReceived(payload)
+        // Parse events (for tracking) before forwarding
+        EventRouter.onPacket(payload)
 
+        // Forward to Albion server
         try {
             val dstIp = InetAddress.getByAddress(byteArrayOf(buf[16], buf[17], buf[18], buf[19]))
             val pkt = DatagramPacket(payload, payload.size, dstIp, dstPort)
@@ -172,9 +174,11 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
 
     override fun onDestroy() {
         running = false
-        EventRouter.setPlayerListener(null)
+        EventRouter.listener = null
         super.onDestroy()
     }
+
+    // ── EventRouter.PlayerListener ──────────────────────────────────────────────
 
     override fun onPlayerJoined(player: com.albionplayersradar.data.Player) {
         Log.d(TAG, "JOIN: ${player.name}")
