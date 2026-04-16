@@ -35,7 +35,6 @@ class MainActivity : AppCompatActivity(), PhotonPacketParser.PlayerListener {
     private var vpnBound = false
     private var radarView: RadarView? = null
     private var vpnButton: Button? = null
-    private var clearButton: Button? = null
     private var statusText: TextView? = null
 
     private val serviceConnection = object : ServiceConnection {
@@ -66,15 +65,16 @@ class MainActivity : AppCompatActivity(), PhotonPacketParser.PlayerListener {
         createNotificationChannel()
         setContentView(R.layout.activity_main)
 
-        statusText = findViewById(R.id.status_text)
         vpnButton = findViewById(R.id.btn_toggle)
-        clearButton = findViewById(R.id.btn_clear)
-        radarView = findViewById(R.id.radar_view)
+        val clearBtn = findViewById<Button>(R.id.btn_clear)
+        statusText = findViewById(R.id.status_text)
 
-        vpnButton?.setOnClickListener { onToggleVpn() }
-        clearButton?.setOnClickListener { radarView?.clearPlayers() }
+        vpnButton?.setOnClickListener { toggleVpn() }
+        clearBtn?.setOnClickListener { radarView?.clearPlayers() }
 
-        updateVpnButton()
+        findViewById<FrameLayout>(R.id.radar_container)?.let { container ->
+            radarView = RadarView(this).also { container.addView(it) }
+        }
     }
 
     override fun onStart() {
@@ -93,49 +93,30 @@ class MainActivity : AppCompatActivity(), PhotonPacketParser.PlayerListener {
         }
     }
 
-    private fun onToggleVpn() {
-        if (vpnService != null && vpnService?.isRunning == true) {
-            stopVpn()
+    private fun toggleVpn() {
+        if (vpnBound && vpnService?.isRunning == true) {
+            vpnService?.stopVpn()
         } else {
-            requestVpnPermission()
+            val intent = VpnService.prepare(this)
+            if (intent != null) {
+                vpnPermissionLauncher.launch(intent)
+            } else {
+                startVpn()
+            }
         }
-    }
-
-    private fun requestVpnPermission() {
-        val intent = VpnService.prepare(this)
-        if (intent != null) {
-            vpnPermissionLauncher.launch(intent)
-        } else {
-            startVpn()
-        }
+        updateVpnButton()
     }
 
     private fun startVpn() {
-        statusText?.text = "Starting VPN..."
-        vpnButton?.isEnabled = false
-
-        val intent = Intent(this, AlbionVpnService::class.java)
-        startForegroundService(intent)
-        bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
-    }
-
-    private fun stopVpn() {
-        if (vpnBound) {
-            vpnService?.stopVpn()
-            vpnService?.setPlayerListener(null)
-            unbindService(serviceConnection)
-            vpnBound = false
-        }
-        vpnService = null
+        if (!vpnBound) return
+        vpnService?.startVpn()
         updateVpnButton()
-        statusText?.text = "VPN Stopped"
     }
 
     private fun updateVpnButton() {
-        val running = vpnService?.isRunning == true
-        vpnButton?.text = if (running) "Disconnect" else "Connect VPN"
-        vpnButton?.isEnabled = true
-        statusText?.text = if (running) "Tracking Players" else "Tap Connect to start"
+        val running = vpnBound && vpnService?.isRunning == true
+        vpnButton?.text = if (running) "Stop Radar" else "Start Radar"
+        statusText?.text = if (running) "Radar Active" else "Radar Inactive"
     }
 
     private fun createNotificationChannel() {
@@ -145,134 +126,81 @@ class MainActivity : AppCompatActivity(), PhotonPacketParser.PlayerListener {
                 "Albion Radar",
                 NotificationManager.IMPORTANCE_LOW
             )
-            channel.description = "Shows radar status"
-            val manager = getSystemService(NotificationManager::class.java)
-            manager.createNotificationChannel(channel)
+            (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager)
+                .createNotificationChannel(channel)
         }
     }
 
-    // PhotonPacketParser.PlayerListener
     override fun onPlayerFound(player: PhotonPacketParser.PlayerInfo) {
-        runOnUiThread {
-            radarView?.addPlayer(player)
-            updateCount()
-        }
+        runOnUiThread { radarView?.addPlayer(player) }
     }
 
-    override fun onPlayerLeft(playerId: Int) {
-        runOnUiThread {
-            radarView?.removePlayer(playerId)
-            updateCount()
-        }
+    override fun onPlayerLeft(id: Int) {
+        runOnUiThread { radarView?.removePlayer(id) }
     }
 
     override fun onPlayerMoved(player: PhotonPacketParser.PlayerInfo) {
-        runOnUiThread {
-            radarView?.updatePlayer(player)
-        }
+        runOnUiThread { radarView?.updatePlayer(player) }
     }
 
-    override fun onPlayerHealthChanged(playerId: Int, health: Float, maxHealth: Float) {
-        runOnUiThread {
-            radarView?.updatePlayerHealth(playerId, health, maxHealth)
-        }
-    }
-
-    private fun updateCount() {
-        val count = radarView?.getPlayerCount() ?: 0
-        statusText?.text = "Players: $count"
-    }
+    override fun onPlayerHealthChanged(id: Int, health: Float, maxHealth: Float) {}
 
     companion object {
-        private const val CHANNEL_ID = "albion_radar_channel"
+        const val CHANNEL_ID = "albion_radar_channel"
     }
 }
 
-class RadarView @JvmOverloads constructor(
-    context: Context,
-    attrs: android.util.AttributeSet? = null
-) : View(context, attrs) {
+class RadarView(context: Context) : View(context) {
 
     private val players = mutableMapOf<Int, PhotonPacketParser.PlayerInfo>()
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val localPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private var centerX = 0f
-    private var centerY = 0f
-    private var scale = 50f
+    private val paint = Paint().apply {
+        color = Color.WHITE
+        textSize = 36f
+        isAntiAlias = true
+    }
+    private val playerDot = Paint().apply {
+        color = Color.CYAN
+        style = Paint.Style.FILL
+    }
+    private val playerLine = Paint().apply {
+        color = Color.GRAY
+        strokeWidth = 2f
+        style = Paint.Style.STROKE
+    }
+    private val localPaint = Paint().apply {
+        color = Color.GREEN
+        style = Paint.Style.FILL
+    }
+
     private var localX = 0f
     private var localY = 0f
-
-    private val hostileColor = Color.parseColor("#FF4444")
-    private val alliedColor = Color.parseColor("#44FF44")
-    private val neutralColor = Color.parseColor("#FFFF44")
-    private val localColor = Color.parseColor("#4488FF")
-
-    init {
-        localPaint.color = localColor
-        localPaint.style = Paint.Style.STROKE
-        localPaint.strokeWidth = 3f
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        centerX = w / 2f
-        centerY = h / 2f
-    }
+    private var scale = 20f
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
 
-        // Draw range rings
-        paint.color = Color.parseColor("#333333")
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = 1f
-
-        for (r in listOf(50f, 100f, 150f)) {
-            canvas.drawCircle(centerX, centerY, r * scale / 50f, paint)
-        }
+        val centerX = width / 2f
+        val centerY = height / 2f
 
         // Draw local player
         canvas.drawCircle(centerX, centerY, 8f, localPaint)
 
         // Draw players
-        for (player in players.values) {
-            val dx = (player.posX - localX) * scale / 50f
-            val dy = (player.posY - localY) * scale / 50f
+        players.values.forEach { player ->
+            val dx = (player.posX - localX) * scale
+            val dy = (player.posY - localY) * scale
+            val px = centerX + dx
+            val py = centerY + dy
 
-            if (dx * dx + dy * dy > 4000000f) continue
-
-            val sx = centerX + dx
-            val sy = centerY - dy
-
-            val color = when {
-                player.faction == 255 -> hostileColor
-                player.faction in 1..6 -> neutralColor
-                else -> alliedColor
-            }
-
-            paint.color = color
-            paint.style = Paint.Style.FILL
-            canvas.drawCircle(sx, sy, 6f, paint)
-
-            paint.color = Color.WHITE
-            paint.textSize = 10f
-            paint.style = Paint.Style.FILL
-            canvas.drawText(player.name.take(8), sx + 10f, sy - 5f, paint)
-
-            if (player.guild != null) {
-                paint.textSize = 8f
-                paint.color = Color.LTGRAY
-                canvas.drawText(player.guild.take(8), sx + 10f, sy + 8f, paint)
+            if (px >= 0 && px <= width && py >= 0 && py <= height) {
+                canvas.drawCircle(px, py, 6f, playerDot)
+                canvas.drawText(player.name ?: "??", px + 10, py - 10, paint)
             }
         }
     }
 
     fun addPlayer(player: PhotonPacketParser.PlayerInfo) {
         players[player.id] = player
-        if (players.size == 1) {
-            localX = player.posX
-            localY = player.posY
-        }
         invalidate()
     }
 
@@ -283,18 +211,7 @@ class RadarView @JvmOverloads constructor(
 
     fun updatePlayer(player: PhotonPacketParser.PlayerInfo) {
         players[player.id] = player
-        if (player.equipment != null) {
-            localX = player.posX
-            localY = player.posY
-        }
         invalidate()
-    }
-
-    fun updatePlayerHealth(id: Int, health: Float, maxHealth: Float) {
-        players[id]?.let { p ->
-            players[id] = p.copy(health = health, maxHealth = maxHealth)
-            invalidate()
-        }
     }
 
     fun clearPlayers() {
@@ -302,5 +219,9 @@ class RadarView @JvmOverloads constructor(
         invalidate()
     }
 
-    fun getPlayerCount() = players.size
+    fun setLocalPosition(x: Float, y: Float) {
+        localX = x
+        localY = y
+        invalidate()
+    }
 }
