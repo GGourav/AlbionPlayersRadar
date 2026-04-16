@@ -5,11 +5,11 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
 import android.net.VpnService
+import android.os.Binder
 import android.os.FileDescriptor
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import com.albionplayersradar.R
 import com.albionplayersradar.parser.EventRouter
 import com.albionplayersradar.ui.MainActivity
 import java.net.DatagramPacket
@@ -22,68 +22,31 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
     private var readerThread: Thread? = null
     private var proxySocket: DatagramSocket? = null
     private var tunFd: FileDescriptor? = null
-    private var playerListener: EventRouter.PlayerListener? = null
     private var eventRouter: EventRouter? = null
     private val PHOTON_PORT = 5056
     private val SERVER_IP = "5.45.187.219"
+    private val SERVER_PORT = 5056
 
     private val notification: Notification by lazy {
-        val channel = NotificationCompat.Builder(this, "albion_vpn")
-            .build()
         NotificationCompat.Builder(this, "albion_vpn")
             .setContentTitle("Albion Players Radar")
             .setContentText("Scanning for players...")
-            .setSmallIcon(android.R.drawable.ic_menu_mylocation)
-            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setSmallIcon(R.drawable.ic_launcher)
             .build()
     }
 
-    fun startVpn() {
-        if (running) return
-        try {
-            val vpn = android.net.VpnService.Builder()
-                .setMtu(2048)
-                .addAddress("10.0.0.2", 32)
-                .addRoute("0.0.0.0", 0)
-                .addDnsServer("8.8.8.8")
-                .addAllowedApplication("com.albiononline")
-            tunFd = vpn.establish()?.fileDescriptor
-            if (tunFd == null) {
-                Log.e(TAG, "VPN establish returned null")
-                return
-            }
-            proxySocket = DatagramSocket(PHOTON_PORT)
-            proxySocket?.reuseAddress = true
-            running = true
-            readerThread = Thread { readLoop() }
-            readerThread?.start()
-            Log.i(TAG, "VPN started")
-        } catch (e: Exception) {
-            Log.e(TAG, "startVpn error: ${e.message}")
-        }
+    inner class LocalBinder : Binder() {
+        fun getService(): AlbionVpnService = this@AlbionVpnService
     }
 
-    private fun readLoop() {
-        val buffer = ByteArray(65535)
-        val socket = proxySocket ?: return
-        while (running && !Thread.currentThread().isInterrupted) {
-            try {
-                val packet = DatagramPacket(buffer, buffer.size)
-                socket.receive(packet)
-                val payload = packet.data.copyOf(packet.length)
-                eventRouter?.onPacketReceived(payload)
-            } catch (e: Exception) {
-                if (running) Log.e(TAG, "readLoop error: ${e.message}")
-            }
-        }
-    }
+    private val binder = LocalBinder()
 
-    fun stopVpn() {
-        running = false
-        readerThread?.interrupt()
-        proxySocket?.close()
-        tunFd = null
-        Log.i(TAG, "VPN stopped")
+    override fun onBind(intent: Intent): IBinder = binder
+
+    override fun onCreate() {
+        super.onCreate()
+        eventRouter = EventRouter()
+        eventRouter?.setPlayerListener(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -92,38 +55,122 @@ class AlbionVpnService : Service(), EventRouter.PlayerListener {
         return START_STICKY
     }
 
-    override fun onBind(intent: Intent): IBinder = binder
+    private fun startVpn() {
+        if (running) return
+        val vpn = VpnService.Builder()
+            .setMtu(2048)
+            .addAddress("10.0.0.2", 32)
+            .addRoute("0.0.0.0", 0)
+            .addDnsServer("8.8.8.8")
+            .addAllowedApplication("com.albiononline")
+        tunFd = vpn.establish()?.fileDescriptor
+        if (tunFd == null) {
+            Log.e("AlbionVpnService", "VPN establish returned null")
+            return
+        }
+        proxySocket = DatagramSocket(PHOTON_PORT)
+        proxySocket?.reuseAddress = true
+        running = true
+        readerThread = Thread { readLoop() }
+        readerThread?.start()
+    }
+
+    private fun readLoop() {
+        val buffer = ByteArray(32767)
+        val packet = DatagramPacket(buffer, buffer.size)
+        while (running) {
+            try {
+                proxySocket?.receive(packet)
+                val data = packet.data
+                val length = packet.length
+                val destAddr = packet.address
+                val destPort = packet.port
+                // Write to TUN
+                tunFd?.let { fd ->
+                    try {
+                        val out = FileDescriptorOutputStream(fd)
+                        out.write(data, 0, length)
+                        out.flush()
+                    } catch (_: Exception) {}
+                }
+                // Handle outgoing packet through parser
+                if (destAddr.hostAddress == SERVER_IP && destPort == SERVER_PORT) {
+                    try {
+                        val parser = PhotonPacketParser(eventRouter!!)
+                        val eventCodes = parser.parsePacket(data, length)
+                    } catch (_: Exception) {}
+                }
+                // Handle response
+                val responseData = receiveFromServer()
+                if (responseData != null && responseData.isNotEmpty()) {
+                    try {
+                        val parser = PhotonPacketParser(eventRouter!!)
+                        parser.parsePacket(responseData, responseData.size)
+                    } catch (_: Exception) {}
+                    // Write response to TUN
+                    tunFd?.let { fd ->
+                        try {
+                            val out = FileDescriptorOutputStream(fd)
+                            out.write(responseData, 0, responseData.size)
+                            out.flush()
+                        } catch (_: Exception) {}
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun receiveFromServer(): ByteArray? {
+        return try {
+            val buf = ByteArray(32767)
+            val pkt = DatagramPacket(buf, buf.size)
+            proxySocket?.receive(pkt)
+            buf.copyOf(pkt.length)
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     override fun onDestroy() {
-        stopVpn()
+        running = false
+        readerThread?.interrupt()
+        proxySocket?.close()
         super.onDestroy()
     }
 
-    private val binder = object : Binder() {
-        fun getService(): AlbionVpnService = this@AlbionVpnService
-    }
+    // EventRouter.PlayerListener implementation
 
-    fun setPlayerListener(listener: EventRouter.PlayerListener) {
-        playerListener = listener
-    }
-
-    override fun onPlayerJoined(id: Long, name: String?, guild: String?, posX: Float, posY: Float, faction: Int) {
-        playerListener?.onPlayerJoined(id, name, guild, posX, posY, faction)
+    override fun onPlayerJoined(id: Long, name: String, guild: String, posX: Float, posY: Float, faction: Int) {
+        Log.d("AlbionVpnService", "Player joined: $name ($guild) at ($posX, $posY) faction=$faction")
     }
 
     override fun onPlayerLeft(id: Long) {
-        playerListener?.onPlayerLeft(id)
+        Log.d("AlbionVpnService", "Player left: $id")
     }
 
     override fun onPlayerMoved(id: Long, posX: Float, posY: Float) {
-        playerListener?.onPlayerMoved(id, posX, posY)
+        Log.d("AlbionVpnService", "Player moved: $id to ($posX, $posY)")
     }
 
     override fun onPlayerHealthChanged(id: Long, currentHp: Float, maxHp: Float) {
-        playerListener?.onPlayerHealthChanged(id, currentHp, maxHp)
+        Log.d("AlbionVpnService", "Player $id health: $currentHp / $maxHp")
+    }
+}
+
+private class FileDescriptorOutputStream(private val fd: FileDescriptor) : java.io.OutputStream() {
+    override fun write(b: Int) {
+        // Not used directly
     }
 
-    companion object {
-        const val TAG = "AlbionVpnService"
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        try {
+            java.io.FileOutputStream(fd).write(b, off, len)
+        } catch (_: Exception) {}
+    }
+
+    override fun flush() {
+        try {
+            java.io.FileOutputStream(fd).flush()
+        } catch (_: Exception) {}
     }
 }
