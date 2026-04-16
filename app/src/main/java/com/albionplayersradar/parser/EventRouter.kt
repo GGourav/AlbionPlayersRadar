@@ -3,9 +3,6 @@ package com.albionplayersradar.parser
 import android.util.Log
 
 object EventRouter {
-
-    private val TAG = "EventRouter"
-
     interface Callback {
         fun onEvent(code: Int, params: Map<Byte, Any>)
         fun onRequest(code: Int, params: Map<Byte, Any>)
@@ -13,100 +10,74 @@ object EventRouter {
     }
 
     private var callback: Callback? = null
-    private var playerListener: PhotonPacketParser.PlayerListener? = null
+    private var playerListener: PlayerListener? = null
 
-    fun setCallback(cb: Callback?) {
-        callback = cb
+    interface PlayerListener {
+        fun onPlayerJoined(id: Long, name: String, guild: String, posX: Float, posY: Float, faction: Int)
+        fun onPlayerLeft(id: Long)
+        fun onPlayerMoved(id: Long, posX: Float, posY: Float)
+        fun onPlayerHealthChanged(id: Long, currentHp: Float, maxHp: Float)
     }
 
-    fun setPlayerListener(listener: PhotonPacketParser.PlayerListener?) {
+    fun setPlayerListener(listener: PlayerListener) {
         playerListener = listener
     }
 
+    fun setCallback(cb: Callback) {
+        callback = cb
+    }
+
     fun routeEvent(code: Int, params: Map<Byte, Any>) {
+        when (code) {
+            29 -> routeNewCharacter(params)
+            3 -> routeMove(params)
+            1 -> routeLeave(params)
+            6 -> routeHealthUpdate(params)
+            91 -> routeRegenHealth(params)
+        }
+        callback?.onEvent(code, params)
+    }
+
+    private fun routeNewCharacter(params: Map<Byte, Any>) {
         try {
-            callback?.onEvent(code, params)
-
-            when (code) {
-                PhotonPacketParser.EVENT_LEAVE -> {
-                    val id = (params[0] as? Number)?.toInt() ?: return
-                    playerListener?.onPlayerLeft(id)
-                }
-                PhotonPacketParser.EVENT_MOVE -> {
-                    val id = (params[0] as? Number)?.toInt() ?: return
-                    val posX = (params[4] as? Number)?.toFloat() ?: 0f
-                    val posY = (params[5] as? Number)?.toFloat() ?: 0f
-                    val existing = findPlayer(id)
-                    if (existing != null) {
-                        val updated = PhotonPacketParser.PlayerInfo(
-                            id = existing.id,
-                            name = existing.name,
-                            guild = existing.guild,
-                            alliance = existing.alliance,
-                            posX = posX,
-                            posY = posY,
-                            posZ = existing.posZ,
-                            health = existing.health,
-                            maxHealth = existing.maxHealth,
-                            isMounted = existing.isMounted,
-                            faction = existing.faction,
-                            equipment = existing.equipment,
-                            spells = existing.spells,
-                            attackRange = existing.attackRange,
-                            type = existing.type
-                        )
-                        playerListener?.onPlayerMoved(updated)
-                    }
-                }
-                PhotonPacketParser.EVENT_NEW_CHARACTER -> {
-                    val id = (params[0] as? Number)?.toInt() ?: return
-                    val name = params[1] as? String ?: "Unknown"
-                    val guild = params[8] as? String
-                    val alliance = params[51] as? String
-                    val posX = (params[9] as? Number)?.toFloat() ?: 0f
-                    val posY = (params[10] as? Number)?.toFloat() ?: 0f
-                    val faction = (params[53] as? Number)?.toInt() ?: 0
-
-                    val player = PhotonPacketParser.PlayerInfo(
-                        id = id,
-                        name = name,
-                        guild = guild,
-                        alliance = alliance,
-                        posX = posX,
-                        posY = posY,
-                        posZ = 0f,
-                        health = 100f,
-                        maxHealth = 100f,
-                        isMounted = false,
-                        faction = faction,
-                        equipment = null,
-                        spells = null,
-                        attackRange = 0f,
-                        type = 0
-                    )
-                    playerListener?.onPlayerFound(player)
-                }
-                PhotonPacketParser.EVENT_HEALTH_UPDATE -> {
-                    val id = (params[0] as? Number)?.toInt() ?: return
-                    val health = (params[2] as? Number)?.toFloat() ?: 0f
-                    val maxHealth = (params[3] as? Number)?.toFloat() ?: 100f
-                    playerListener?.onPlayerHealthChanged(id, health, maxHealth)
-                }
-            }
+            val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+            val name = params[1.toByte()]?.toString() ?: ""
+            val guild = params[8.toByte()]?.toString() ?: ""
+            val faction = (params[53.toByte()] as? Number)?.toInt() ?: 0
+            val posX = (params[4.toByte()] as? Number)?.toFloat() ?: 0f
+            val posY = (params[5.toByte()] as? Number)?.toFloat() ?: 0f
+            playerListener?.onPlayerJoined(id, name, guild, posX, posY, faction)
         } catch (e: Exception) {
-            Log.e(TAG, "Error routing event $code: ${e.message}")
+            Log.e("EventRouter", "NewCharacter error: ${e.message}")
         }
     }
 
-    fun routeRequest(code: Int, params: Map<Byte, Any>) {
-        callback?.onRequest(code, params)
+    private fun routeMove(params: Map<Byte, Any>) {
+        try {
+            val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+            val posX = (params[4.toByte()] as? Number)?.toFloat() ?: return
+            val posY = (params[5.toByte()] as? Number)?.toFloat() ?: return
+            playerListener?.onPlayerMoved(id, posX, posY)
+        } catch (_: Exception) {}
     }
 
-    fun routeResponse(code: Int, params: Map<Byte, Any>) {
-        callback?.onResponse(code, params)
+    private fun routeLeave(params: Map<Byte, Any>) {
+        try {
+            val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+            playerListener?.onPlayerLeft(id)
+        } catch (_: Exception) {}
     }
 
-    private fun findPlayer(id: Int): PhotonPacketParser.PlayerInfo? {
-        return null
+    private fun routeHealthUpdate(params: Map<Byte, Any>) {
+        try {
+            val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+            val currentHp = (params[2.toByte()] as? Number)?.toFloat() ?: return
+            val maxHp = (params[3.toByte()] as? Number)?.toFloat() ?: return
+            playerListener?.onPlayerHealthChanged(id, currentHp, maxHp)
+        } catch (_: Exception) {}
+    }
+
+    private fun routeRegenHealth(params: Map<Byte, Any>) {
+        routeHealthUpdate(params)
     }
 }
