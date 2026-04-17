@@ -65,7 +65,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startVpn() {
-        val intent = android.content.Intent(this, AlbionVpnService::class.java)
+        val intent = Intent(this, AlbionVpnService::class.java)
         startForegroundService(intent)
         bindService(intent, vpnConnection, BIND_AUTO_CREATE)
         updateStatus("Starting...")
@@ -73,7 +73,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun stopVpn() {
         if (vpnBound) { unbindService(vpnConnection); vpnBound = false }
-        stopService(android.content.Intent(this, AlbionVpnService::class.java))
+        stopService(Intent(this, AlbionVpnService::class.java))
         vpnService = null
         updateStatus("Tap START to activate")
     }
