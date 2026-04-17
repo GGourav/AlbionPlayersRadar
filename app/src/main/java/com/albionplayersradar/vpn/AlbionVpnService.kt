@@ -8,39 +8,39 @@ import android.net.VpnService
 import android.os.Binder
 import android.os.IBinder
 import android.util.Log
-import androidx.core.app.NotificationCompat
-import com.albionplayersradar.MainApplication
+import com.albionplayersradar.parser.EventRouter
 import com.albionplayersradar.parser.PhotonPacketParser
 import com.albionplayersradar.ui.MainActivity
 import java.io.FileInputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import java.nio.ByteBuffer
 
-class AlbionVpnService : Service() {
+class AlbionVpnService : Service(), EventRouter.PlayerCallback {
 
-    private val binder = LocalBinder()
     private var running = false
     private var vpnFd: android.os.ParcelFileDescriptor? = null
     private var udpSocket: DatagramSocket? = null
-    private var thread: Thread? = null
-    private var proxyThread: Thread? = null
+    private var onUpdate: ((String) -> Unit)? = null
 
-    private val SERVER_IP = "5.45.187.219"
-    private val SERVER_PORT = 5056
-    private val LOCAL_IP = "10.0.0.2"
-    private val NOTIFY_ID = 1001
+    companion object {
+        private const val TAG = "AlbionVPN"
+        private const val NOTIFY_ID = 1001
+        private const val SERVER_IP = "5.45.187.219"
+        private const val SERVER_PORT = 5056
+        private const val LOCAL_IP = "10.0.0.2"
+    }
 
     inner class LocalBinder : Binder() {
         fun getService(): AlbionVpnService = this@AlbionVpnService
     }
+    private val binder = LocalBinder()
 
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
-        Log.d("AlbionVPN", "Service created")
+        EventRouter.setCallback(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -55,25 +55,23 @@ class AlbionVpnService : Service() {
             Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE
         )
-        return NotificationCompat.Builder(this, MainApplication.CHANNEL_ID)
+        return Notification.Builder(this, "radar_channel")
             .setContentTitle("Albion Players Radar")
-            .setContentText("Radar Active")
+            .setContentText("Active")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setContentIntent(pending)
             .setOngoing(true)
             .build()
     }
 
+    fun setUpdateListener(cb: (String) -> Unit) {
+        onUpdate = cb
+    }
+
     private fun startVpn() {
         if (running) return
-        running = true
-
-        val prepareIntent = VpnService.prepare(this)
-        if (prepareIntent != null) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
-            return
-        }
+        val prepared = VpnService.prepare(this)
+        if (prepared != null) { stopSelf(); return }
 
         try {
             val builder = VpnService.Builder()
@@ -82,72 +80,68 @@ class AlbionVpnService : Service() {
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("8.8.8.8")
                 .setMtu(1500)
-                .addAllowedApplication("com.albiononline")
 
             vpnFd = builder.establish()
             if (vpnFd == null) { stopSelf(); return }
 
+            running = true
             udpSocket = DatagramSocket()
             protect(udpSocket!!)
-            udpSocket!!.connect(InetAddress.getByName(SERVER_IP), SERVER_PORT)
 
-            thread = Thread { readLoop() }
-            proxyThread = Thread { writeLoop() }
-            thread!!.start()
-            proxyThread!!.start()
-
-            Log.d("AlbionVPN", "VPN started")
-
+            Thread { readLoop() }.start()
+            Thread { writeLoop() }.start()
+            Log.d(TAG, "VPN started")
         } catch (e: Exception) {
-            Log.e("AlbionVPN", "startVpn failed: ${e.message}")
+            Log.e(TAG, "startVpn failed: ${e.message}")
             stopSelf()
         }
     }
 
-    private val parser = PhotonPacketParser()
-    private val players = mutableMapOf<Long, PlayerState>()
-    private var localPosX = 0f
-    private var localPosY = 0f
-    private var localPlayerId: Long = -1
-    private var currentZone = ""
-
-    data class PlayerState(
-        var name: String = "",
-        var guildName: String? = null,
-        var allianceName: String? = null,
-        var faction: Int = 0,
-        var posX: Float = 0f,
-        var posY: Float = 0f,
-        var health: Float = 0f,
-        var maxHealth: Float = 0f,
-        var isMounted: Boolean = false,
-        var lastSeen: Long = System.currentTimeMillis()
-    )
-
-    private var onUpdate: ((String) -> Unit)? = null
-
-    fun setPlayerUpdateListener(cb: (String) -> Unit) { onUpdate = cb }
-    private fun notifyUpdate(msg: String) { onUpdate?.invoke(msg) }
-
     private fun readLoop() {
         val fd = vpnFd ?: return
-        val inp = FileInputStream(fd.fileDescriptor)
-        val buf = ByteArray(2048)
-        while (running) {
-            try {
+        try {
+            val inp = FileInputStream(fd.fileDescriptor)
+            val buf = ByteArray(4096)
+            while (running) {
                 val n = inp.read(buf)
                 if (n > 0) handleOutgoing(buf, n)
-            } catch (e: Exception) {
-                if (running) Log.e("AlbionVPN", "readLoop: ${e.message}")
-                break
             }
+        } catch (e: Exception) {
+            if (running) Log.e(TAG, "readLoop: ${e.message}")
+        }
+    }
+
+    private fun writeLoop() {
+        try {
+            val sock = udpSocket ?: return
+            val buf = ByteArray(4096)
+            while (running) {
+                val pkt = DatagramPacket(buf, buf.size)
+                sock.receive(pkt)
+                if (pkt.length > 0) {
+                    val resp = pkt.data.copyOf(pkt.length)
+                    val written = writeToTunnel(resp)
+                    if (written < 0) break
+                }
+            }
+        } catch (e: Exception) {
+            if (running) Log.e(TAG, "writeLoop: ${e.message}")
+        }
+    }
+
+    private fun writeToTunnel(data: ByteArray): Int {
+        val fd = vpnFd ?: return -1
+        try {
+            val out = FileInputStream(fd.fileDescriptor)
+            out.read(data)
+            return data.size
+        } catch (e: Exception) {
+            return -1
         }
     }
 
     private fun handleOutgoing(buf: ByteArray, len: Int) {
         if (len < 20) return
-        val version = (buf[0].toInt() and 0xFF) shr 4
-        if (version != 4) return
         val proto = buf[9].toInt() and 0xFF
         if (proto != 17) return
         val ihl = (buf[0].toInt() and 0x0F) * 4
@@ -155,12 +149,13 @@ class AlbionVpnService : Service() {
         val payloadOff = ihl + 8
         val payloadLen = len - payloadOff
         if (payloadLen < 12) return
-
         val payload = buf.copyOfRange(payloadOff, payloadOff + payloadLen)
 
-        parser.parsePacket(payload) { type, params ->
-            handlePhotonEvent(type, params)
-        }
+        try {
+            PhotonPacketParser.parse(payload) { type, params ->
+                EventRouter.route(type, params)
+            }
+        } catch (e: Exception) {}
 
         try {
             val dstIp = InetAddress.getByAddress(byteArrayOf(buf[16], buf[17], buf[18], buf[19]))
@@ -169,132 +164,51 @@ class AlbionVpnService : Service() {
         } catch (e: Exception) {}
     }
 
-    private fun writeLoop() {
-        val buf = ByteArray(2048)
-        while (running) {
-            try {
-                val pkt = DatagramPacket(buf, buf.size)
-                udpSocket?.receive(pkt)
-                if (pkt.length > 0) {
-                    vpnFd?.let { fd ->
-                        FileInputStream(fd.fileDescriptor).write(buf, 0, pkt.length)
-                    }
-                }
-            } catch (e: Exception) {}
-        }
+    override fun onPlayerJoined(player: com.albionplayersradar.data.Player) {
+        val msg = "SPAWN:${player.id}|${player.name}|${player.guildName ?: ""}|${player.allianceName ?: ""}|${player.faction}"
+        Log.d(TAG, msg)
+        onUpdate?.invoke(msg)
     }
 
-    private fun handlePhotonEvent(type: String, params: Map<Byte, Any>) {
-        when (type) {
-            "event" -> handleEvent(params)
-            "response" -> handleResponse(params)
-        }
+    override fun onPlayerLeft(id: Long) {
+        val msg = "LEAVE:$id"
+        Log.d(TAG, msg)
+        onUpdate?.invoke(msg)
     }
 
-    private fun handleEvent(params: Map<Byte, Any>) {
-        val code = (params[252.toByte()] as? Number)?.toInt() ?: return
-        when (code) {
-            1 -> {
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                if (players.remove(id) != null) {
-                    notifyUpdate("LEAVE:$id")
-                    MainActivity.broadcastPlayerLeave(id)
-                }
-            }
-            29 -> {
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                if (id == localPlayerId) return
-                val name = params[1.toByte()] as? String ?: return
-                val guild = params[8.toByte()] as? String
-                val alliance = params[51.toByte()] as? String
-                val faction = (params[53.toByte()] as? Number)?.toInt() ?: 0
-                players[id] = PlayerState(name = name, guildName = guild, allianceName = alliance, faction = faction)
-                notifyUpdate("SPAWN:$id|$name|${guild ?: ""}|${alliance ?: ""}|$faction")
-                MainActivity.broadcastPlayerJoined(id, name, guild ?: "", 0f, 0f, faction)
-            }
-            3 -> {
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                val raw = params[1.toByte()] as? ByteArray ?: return
-                if (raw.size < 17) return
-                val px = ByteBuffer.wrap(raw).order(java.nio.ByteOrder.LITTLE_ENDIAN).float
-                val py = ByteBuffer.wrap(raw, 4, raw.size - 4).order(java.nio.ByteOrder.LITTLE_ENDIAN).float
-                players[id]?.let { p ->
-                    p.posX = px; p.posY = py; p.lastSeen = System.currentTimeMillis()
-                    notifyUpdate("MOVE:$id|$px|$py")
-                    MainActivity.broadcastPlayerMove(id, px, py)
-                }
-            }
-            6 -> {
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                val hp = (params[2.toByte()] as? Number)?.toFloat() ?: return
-                val maxHp = (params[3.toByte()] as? Number)?.toFloat() ?: return
-                players[id]?.let { p -> p.health = hp; p.maxHealth = maxHp }
-                notifyUpdate("HEALTH:$id|$hp|$maxHp")
-            }
-            91 -> {
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                val hp = (params[2.toByte()] as? Number)?.toFloat() ?: return
-                val maxHp = (params[3.toByte()] as? Number)?.toFloat() ?: return
-                players[id]?.let { p -> p.health = hp; p.maxHealth = maxHp }
-            }
-            209 -> {
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                val mounted = params[11.toByte()] == true || params[11.toByte()] == "true"
-                players[id]?.isMounted = mounted
-            }
-            359 -> {
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                val faction = (params[1.toByte()] as? Number)?.toInt() ?: return
-                players[id]?.let { p ->
-                    val old = p.faction; p.faction = faction
-                    if (old != faction) MainActivity.broadcastFactionChanged(id, faction)
-                }
-            }
-        }
+    override fun onPlayerMoved(player: com.albionplayersradar.data.Player) {
+        val msg = "MOVE:${player.id}|${player.posX}|${player.posY}"
+        onUpdate?.invoke(msg)
     }
 
-    private fun handleResponse(params: Map<Byte, Any>) {
-        val code = (params[253.toByte()] as? Number)?.toInt() ?: return
-        if (code == 2) {
-            val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-            val posData = params[9.toByte()] as? ByteArray
-            if (posData != null && posData.size >= 8) {
-                val buf = ByteBuffer.wrap(posData).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                localPosX = buf.float; localPosY = buf.float
-                localPlayerId = id
-                notifyUpdate("LOCAL:$localPosX|$localPosY")
-                MainActivity.broadcastLocalPlayer(id, localPosX, localPosY)
-            } else {
-                val posList = params[9.toByte()] as? List<*>
-                if (posList != null && posList.size >= 2) {
-                    localPosX = (posList[0] as? Number)?.toFloat() ?: 0f
-                    localPosY = (posList[1] as? Number)?.toFloat() ?: 0f
-                    localPlayerId = id
-                    notifyUpdate("LOCAL:$localPosX|$localPosY")
-                    MainActivity.broadcastLocalPlayer(id, localPosX, localPosY)
-                }
-            }
-            val zoneId = params[8.toByte()] as? String
-            if (zoneId != null && zoneId.isNotEmpty() && zoneId != currentZone) {
-                currentZone = zoneId; players.clear()
-                notifyUpdate("ZONE:$zoneId")
-                MainActivity.broadcastZone(zoneId)
-            }
-        }
+    override fun onPlayerHealthChanged(id: Long, currentHp: Float, maxHp: Float) {
+        onUpdate?.invoke("HEALTH:$id|$currentHp|$maxHp")
     }
 
-    fun getAllPlayers() = players.values.toList()
-    fun getLocalPosition() = localPosX to localPosY
-    fun getCurrentZone() = currentZone
-    fun getLocalPlayerId() = localPlayerId
-    fun getCurrentZonePvpType() = com.albionplayersradar.data.ZonesDatabase.getPvpType(currentZone)
+    override fun onMountChanged(id: Long, isMounted: Boolean) {
+        onUpdate?.invoke("MOUNT:$id|$isMounted")
+    }
+
+    override fun onFactionChanged(id: Long, faction: Int) {
+        onUpdate?.invoke("FACTION:$id|$faction")
+    }
+
+    override fun onZoneChanged(zoneId: String) {
+        onUpdate?.invoke("ZONE:$zoneId")
+    }
+
+    fun stopVpn() {
+        running = false
+        try {
+            vpnFd?.close()
+            udpSocket?.close()
+        } catch (e: Exception) {}
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
 
     override fun onDestroy() {
-        running = false
-        try { thread?.interrupt() } catch (_: Exception) {}
-        try { proxyThread?.interrupt() } catch (_: Exception) {}
-        try { vpnFd?.close() } catch (_: Exception) {}
-        try { udpSocket?.close() } catch (_: Exception) {}
         super.onDestroy()
+        stopVpn()
     }
 }
