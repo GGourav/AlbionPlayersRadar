@@ -9,12 +9,13 @@ data class Player(
     val posX: Float,
     val posY: Float,
     val posZ: Float,
-    val currentHealth: Int,
-    val maxHealth: Int,
-    val isMounted: Boolean
+    val currentHealth: Float,
+    val maxHealth: Float,
+    val isMounted: Boolean,
+    val detectedAt: Long = System.currentTimeMillis()
 ) {
     val healthPercent: Float
-        get() = if (maxHealth > 0) currentHealth.toFloat() / maxHealth else 0f
+        get() = if (maxHealth > 0) currentHealth / maxHealth else 0f
 
     val isHostile: Boolean
         get() = faction == 255
