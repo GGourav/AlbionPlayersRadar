@@ -97,51 +97,39 @@ object PhotonPacketParser {
         when (msgType.toInt()) {
             MSG_EVENT.toInt() -> {
                 val code = buf.get().toInt() and 0xFF
-                val params = mutableMapOf<Byte, Any>()
-                var count = 0
-                while (count < 10 && buf.hasRemaining()) {
-                    val key = buf.get()
-                    val typeCode = buf.get()
-                    val value = readValue(buf, typeCode)
-                    if (value != null) {
-                        params[key] = value
-                        count++
-                    } else break
+                val params: Map<Byte, Any> = mutableMapOf()
+                val count = readUVariant(buf)
+                for (i in 0 until count) {
+                    val k = buf.get()
+                    val v = readValue(buf, buf.get())
+                    if (v != null) (params as MutableMap)[k] = v
                 }
-                params[252.toByte()] = code
+                (params as MutableMap)[252.toByte()] = code
                 cb("event", params)
             }
             MSG_REQUEST.toInt() -> {
                 val op = buf.get().toInt() and 0xFF
-                val params = mutableMapOf<Byte, Any>()
-                var count = 0
-                while (count < 10 && buf.hasRemaining()) {
-                    val key = buf.get()
-                    val typeCode = buf.get()
-                    val value = readValue(buf, typeCode)
-                    if (value != null) {
-                        params[key] = value
-                        count++
-                    } else break
+                val params: Map<Byte, Any> = mutableMapOf()
+                val count = readUVariant(buf)
+                for (i in 0 until count) {
+                    val k = buf.get()
+                    val v = readValue(buf, buf.get())
+                    if (v != null) (params as MutableMap)[k] = v
                 }
-                params[253.toByte()] = op
+                (params as MutableMap)[253.toByte()] = op
                 cb("request", params)
             }
             MSG_RESPONSE.toInt() -> {
                 val op = buf.get().toInt() and 0xFF
                 buf.short
-                val params = mutableMapOf<Byte, Any>()
-                var count = 0
-                while (count < 10 && buf.hasRemaining()) {
-                    val key = buf.get()
-                    val typeCode = buf.get()
-                    val value = readValue(buf, typeCode)
-                    if (value != null) {
-                        params[key] = value
-                        count++
-                    } else break
+                val params: Map<Byte, Any> = mutableMapOf()
+                val count = readUVariant(buf)
+                for (i in 0 until count) {
+                    val k = buf.get()
+                    val v = readValue(buf, buf.get())
+                    if (v != null) (params as MutableMap)[k] = v
                 }
-                params[253.toByte()] = op
+                (params as MutableMap)[253.toByte()] = op
                 cb("response", params)
             }
         }
@@ -182,42 +170,31 @@ object PhotonPacketParser {
         return String(b, Charsets.UTF_8)
     }
 
-    private fun readHashtable(buf: ByteBuffer): java.util.Map<Any, Any> {
-        val map = java.util.LinkedHashMap<Any, Any>()
+    private fun readHashtable(buf: ByteBuffer): Map<Any, Any> {
+        val map = mutableMapOf<Any, Any>()
         val count = readUVariant(buf)
-        var i = 0
-        while (i < count && buf.hasRemaining() && i < 50) {
-            val keyType = buf.get()
-            val key = readValue(buf, keyType)
-            val valType = buf.get()
-            val value = readValue(buf, valType)
-            if (key != null && value != null) {
-                map[key] = value
-                i++
-            } else break
+        for (i in 0 until count) {
+            val key = readValue(buf, buf.get())
+            val value = readValue(buf, buf.get())
+            if (key != null && value != null) map[key] = value
         }
         return map
     }
 
-    private fun readObjectArray(buf: ByteBuffer): java.util.List<Any?> {
-        val list = java.util.ArrayList<Any?>()
+    private fun readObjectArray(buf: ByteBuffer): List<Any?> {
+        val list = mutableListOf<Any?>()
         val count = readUVariant(buf)
-        var i = 0
-        while (i < count && buf.hasRemaining() && i < 100) {
-            val typeCode = buf.get()
-            list.add(readValue(buf, typeCode))
-            i++
+        for (i in 0 until count) {
+            list.add(readValue(buf, buf.get()))
         }
         return list
     }
 
-    private fun readTypedArray(buf: ByteBuffer, elemType: Byte): java.util.List<Any?> {
-        val list = java.util.ArrayList<Any?>()
+    private fun readTypedArray(buf: ByteBuffer, elemType: Byte): List<Any?> {
+        val list = mutableListOf<Any?>()
         val count = readUVariant(buf)
-        var i = 0
-        while (i < count && buf.hasRemaining() && i < 100) {
+        for (i in 0 until count) {
             list.add(readValue(buf, elemType))
-            i++
         }
         return list
     }
