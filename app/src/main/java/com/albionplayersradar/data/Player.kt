@@ -6,13 +6,12 @@ data class Player(
     val guildName: String?,
     val allianceName: String?,
     val faction: Int,
-    var posX: Float,
-    var posY: Float,
-    var posZ: Float,
-    var currentHealth: Int,
-    var maxHealth: Int,
-    var isMounted: Boolean,
-    var detectedAt: Long = System.currentTimeMillis()
+    val posX: Float,
+    val posY: Float,
+    val posZ: Float,
+    val currentHealth: Int,
+    val maxHealth: Int,
+    val isMounted: Boolean
 ) {
     val healthPercent: Float
         get() = if (maxHealth > 0) currentHealth.toFloat() / maxHealth else 0f
@@ -32,10 +31,6 @@ data class Player(
             isFactionPlayer -> ThreatLevel.FACTION
             else -> ThreatLevel.PASSIVE
         }
-
-    fun touch() {
-        detectedAt = System.currentTimeMillis()
-    }
 }
 
 enum class ThreatLevel { PASSIVE, FACTION, HOSTILE }
