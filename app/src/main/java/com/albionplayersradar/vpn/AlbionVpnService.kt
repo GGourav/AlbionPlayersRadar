@@ -165,3 +165,41 @@ class AlbionVpnService : VpnService(), EventRouter.PlayerListener {
         stopTunnel()
         EventRouter.setPlayerListener(null)
     }
+
+    // ── PlayerListener callbacks ────────────────────────────────────────────────
+
+    override fun onPlayerJoined(id: Long, name: String, guild: String, posX: Float, posY: Float, faction: Int) {
+        onUpdate?.invoke("JOIN:$id|$name|$guild|$faction|$posX|$posY")
+    }
+
+    override fun onPlayerLeft(id: Long) {
+        onUpdate?.invoke("LEAVE:$id")
+    }
+
+    override fun onPlayerMoved(id: Long, posX: Float, posY: Float) {
+        onUpdate?.invoke("MOVE:$id|$posX|$posY")
+    }
+
+    override fun onPlayerHealthChanged(id: Long, current: Int, max: Int) {
+        onUpdate?.invoke("HEALTH:$id|$current|$max")
+    }
+
+    override fun onPlayerMountChanged(id: Long, isMounted: Boolean) {
+        onUpdate?.invoke("MOUNT:$id|$isMounted")
+    }
+
+    override fun onMapChanged(zoneId: String) {
+        onUpdate?.invoke("ZONE:$zoneId")
+    }
+
+    override fun onLocalPlayerMoved(posX: Float, posY: Float) {
+        onUpdate?.invoke("LOCAL:$posX|$posY")
+    }
+
+    companion object {
+        private const val TAG = "AlbionVpnService"
+        private const val NOTIFICATION_ID = 1
+        private const val ALBION_PORT = 5056
+        var onUpdate: ((String) -> Unit)? = null
+    }
+}
