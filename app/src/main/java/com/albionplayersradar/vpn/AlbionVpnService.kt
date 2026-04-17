@@ -17,94 +17,95 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 
-class AlbionVpnService : Service(), EventRouter.Listener {
+class AlbionVpnService : Service(), EventRouter.PlayerListener {
 
     private var running = false
     private var vpnFd: android.os.ParcelFileDescriptor? = null
-    private var udpSocket: DatagramSocket? = null
+    private val players = mutableMapOf<Long, Player>()
+    private var localPosX = 0f
+    private var localPosY = 0f
+    private var currentZone = ""
 
-    private val SERVER_IP = "5.45.187.219"
-    private val SERVER_PORT = 5056
-    private val LOCAL_IP = "10.0.0.2"
-
-    private var callback: PlayerCallback? = null
-
-    interface PlayerCallback {
-        fun onPlayerJoined(player: Player)
-        fun onPlayerMoved(id: Long, posX: Float, posY: Float)
-        fun onPlayerLeft(id: Long)
-        fun onLocalPlayerUpdate(id: Long, posX: Float, posY: Float)
-    }
-
-    fun setCallback(cb: PlayerCallback) { callback = cb }
+    private var onUpdate: ((String) -> Unit)? = null
 
     inner class LocalBinder : Binder() {
-        fun getService() = this@AlbionVpnService
+        fun getService(): AlbionVpnService = this@AlbionVpnService
     }
     private val binder = LocalBinder()
 
-    override fun onBind(intent: Intent) = binder
+    companion object {
+        private const val TAG = "AlbionVpnService"
+        private const val NOTIFY_ID = 1001
+        private const val SERVER_IP = "5.45.187.219"
+        private const val SERVER_PORT = 5056
+        private const val LOCAL_IP = "10.0.0.2"
+    }
+
+    override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onCreate() {
         super.onCreate()
-        EventRouter.listener = this
+        EventRouter.setPlayerListener(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(1, createNotification())
+        startForeground(NOTIFY_ID, makeNotification())
         startVpn()
         return START_STICKY
     }
 
-    private fun createNotification(): Notification {
-        val intent = Intent(this, MainActivity::class.java)
-        val pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+    private fun makeNotification(): Notification {
+        val pending = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java),
+            PendingIntent.FLAG_IMMUTABLE
+        )
         return NotificationCompat.Builder(this, "radar_channel")
             .setContentTitle("Albion Players Radar")
-            .setContentText("VPN running")
+            .setContentText("Active")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
-            .setContentIntent(pi).build()
+            .setContentIntent(pending)
+            .setOngoing(true)
+            .build()
     }
+
+    fun setPlayerUpdateListener(cb: (String) -> Unit) { onUpdate = cb }
 
     private fun startVpn() {
         if (running) return
-        val prepare = VpnService.prepare(this)
-        if (prepare != null) { stopSelf(); return }
-        running = true
         try {
-            val b = VpnService.Builder()
-            b.setSession("AlbionPlayersRadar")
-            b.addAddress(LOCAL_IP, 32)
-            b.addRoute("0.0.0.0", 0)
-            b.addDnsServer("8.8.8.8")
-            b.setMtu(1500)
-            b.addAllowedApplication("com.albiononline")
-            vpnFd = b.establish() ?: return
+            val vpnBuilder = VpnService.Builder()
+                .setSession("AlbionPlayersRadar")
+                .addAddress(LOCAL_IP, 32)
+                .addRoute("0.0.0.0", 0)
+                .addDnsServer("8.8.8.8")
+                .setMtu(1500)
+                .setBlocking(true)
 
-            udpSocket = DatagramSocket()
-            protect(udpSocket!!)
+            vpnFd = vpnBuilder.establish()
+            if (vpnFd == null) { stopSelf(); return }
 
+            running = true
             Thread { readLoop() }.start()
-            Thread { writeLoop() }.start()
+            Thread { proxyLoop() }.start()
             Log.d(TAG, "VPN started")
         } catch (e: Exception) {
-            Log.e(TAG, "startVpn failed: ${e.message}")
+            Log.e(TAG, "VPN start failed: ${e.message}")
             stopSelf()
         }
     }
 
     private fun readLoop() {
         val fd = vpnFd ?: return
-        val inp = FileInputStream(fd.fileDescriptor)
-        val buf = ByteArray(4096)
-        while (running) {
-            try {
+        try {
+            val inp = FileInputStream(fd.fileDescriptor)
+            val buf = ByteArray(4096)
+            while (running) {
                 val n = inp.read(buf)
                 if (n > 0) handleOutgoing(buf, n)
-            } catch (e: Exception) {
-                if (running) Log.e(TAG, "read: ${e.message}")
-                break
             }
+        } catch (e: Exception) {
+            if (running) Log.e(TAG, "read: ${e.message}")
         }
     }
 
@@ -115,90 +116,96 @@ class AlbionVpnService : Service(), EventRouter.Listener {
         val dstPort = ((buf[ihl+2].toInt() and 0xFF) shl 8) or (buf[ihl+3].toInt() and 0xFF)
         val payloadOff = ihl + 8
         val payloadLen = len - payloadOff
-        if (payloadLen < 1) return
+        if (payloadLen < 12) return
         val payload = buf.copyOfRange(payloadOff, payloadOff + payloadLen)
-        EventRouter.onPacket(payload)
+        try { EventRouter.onPacket(payload) } catch (e: Exception) {}
         try {
+            val sock = DatagramSocket()
+            protect(sock)
             val dstIp = InetAddress.getByAddress(byteArrayOf(buf[16], buf[17], buf[18], buf[19]))
             val pkt = DatagramPacket(payload, payload.size, dstIp, dstPort)
-            udpSocket?.send(pkt)
-        } catch (e: Exception) { Log.e(TAG, "send: ${e.message}") }
+            sock.send(pkt)
+            sock.close()
+        } catch (e: Exception) {}
     }
 
-    private fun writeLoop() {
-        val buf = ByteArray(4096)
-        while (running) {
-            try {
-                val pkt = DatagramPacket(buf, buf.size)
-                udpSocket?.receive(pkt)
-                if (pkt.length > 0) {
-                    val resp = buildIpPacket(buf, pkt.length, pkt.address, pkt.port)
-                    vpnFd?.let { vpnWrite(it, resp) }
-                }
-            } catch (e: Exception) { if (running) Log.e(TAG, "recv: ${e.message}") }
+    private fun proxyLoop() {
+        try {
+            val sock = DatagramSocket(SERVER_PORT)
+            protect(sock)
+            val buf = ByteArray(4096)
+            while (running) {
+                try {
+                    val pkt = DatagramPacket(buf, buf.size)
+                    sock.receive(pkt)
+                    if (pkt.length > 0) {
+                        val response = buildIpResponse(pkt.data, pkt.length)
+                        if (response != null) {
+                            val out = DatagramPacket(response, response.size, pkt.address, pkt.port)
+                            sock.send(out)
+                        }
+                    }
+                } catch (e: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "proxy: ${e.message}")
         }
     }
 
-    private fun buildIpPacket(data: ByteArray, len: Int, dst: InetAddress, dstPort: Int): ByteArray {
-        val total = 28 + len
-        val out = ByteArray(total)
-        out[0] = 0x40.toByte()
-        out[1] = 0x11.toByte()
-        java.nio.ByteBuffer.wrap(out, 2, 2).putShort(total.toShort())
-        java.nio.ByteBuffer.wrap(out, 4, 4).putInt(0)
-        out[8] = 64.toByte(); out[9] = 17
-        out[10] = 0; out[11] = 0
-        out[12] = 10; out[13] = 0; out[14] = 0; out[15] = 2
-        dst.address.copyInto(out, 16)
-        java.nio.ByteBuffer.wrap(out, 20, 2).putShort(dstPort.toShort())
-        java.nio.ByteBuffer.wrap(out, 22, 2).putShort((8 + len).toShort())
-        System.arraycopy(data, 0, out, 28, len)
-        return out
+    private fun buildIpResponse(data: ByteArray, len: Int): ByteArray? {
+        if (len < 20) return null
+        val resp = data.copyOf()
+        val srcOff = 12; val dstOff = 16
+        for (i in 0..3) { val t = resp[srcOff+i]; resp[srcOff+i] = resp[dstOff+i]; resp[dstOff+i] = t }
+        resp[9] = 17
+        val totalLen = 8 + len
+        resp[2] = (totalLen shr 8).toByte(); resp[3] = (totalLen and 0xFF).toByte()
+        resp[10] = 0; resp[11] = 0
+        return resp
     }
 
-    private fun vpnWrite(fd: android.os.ParcelFileDescriptor, data: ByteArray) {
-        try {
-            val out = FileOutputStream(fd.fileDescriptor)
-            out.write(data)
-        } catch (e: Exception) { Log.e(TAG, "vpnWrite: ${e.message}") }
+    fun getAllPlayers(): List<Player> = players.values.toList()
+    fun getLocalPosition(): Pair<Float, Float> = localPosX to localPosY
+    fun getCurrentZone(): String = currentZone
+
+    override fun onPlayerJoined(player: Player) {
+        players[player.id] = player
+        notifyUpdate("SPAWN:${player.id}|${player.name}|${player.guildName ?: ""}|${player.allianceName ?: ""}|${player.faction}")
     }
 
-    fun stopRun() {
-        running = false
-        try {
-            vpnFd?.close()
-            udpSocket?.close()
-        } catch (e: Exception) { Log.e(TAG, "stop: ${e.message}") }
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
+    override fun onPlayerLeft(id: Long) {
+        players.remove(id)
+        notifyUpdate("LEAVE:$id")
     }
+
+    override fun onPlayerMoved(player: Player) {
+        players[player.id] = player
+        notifyUpdate("MOVE:${player.id}|${player.posX}|${player.posY}")
+    }
+
+    override fun onPlayerHealthChanged(id: Long, currentHp: Float, maxHp: Float) {
+        players[id]?.let { p ->
+            players[id] = Player(p.id, p.name, p.guildName, p.allianceName, p.faction, p.posX, p.posY, p.posZ, currentHp.toInt(), maxHp.toInt(), p.isMounted)
+            notifyUpdate("HEALTH:$id|$currentHp|$maxHp")
+        }
+    }
+
+    override fun onFactionChanged(id: Long, faction: Int) {
+        players[id]?.let { p ->
+            players[id] = Player(p.id, p.name, p.guildName, p.allianceName, faction, p.posX, p.posY, p.posZ, p.currentHealth, p.maxHealth, p.isMounted)
+            notifyUpdate("FACTION:$id|$faction")
+        }
+    }
+
+    override fun onMountChanged(id: Long, isMounted: Boolean) {}
 
     override fun onDestroy() {
+        running = false
+        vpnFd?.close()
         super.onDestroy()
-        stopRun()
     }
 
-    override fun onNewCharacter(id: Long, name: String, guild: String?, alliance: String?, faction: Int, posX: Float, posY: Float, posZ: Float) {
-        val player = Player(id, name, guild, alliance, faction, posX, posY, posZ, 0, 0, false)
-        callback?.onPlayerJoined(player)
-    }
-
-    override fun onCharacterLeft(id: Long) {
-        callback?.onPlayerLeft(id)
-    }
-
-    override fun onMove(id: Long, posX: Float, posY: Float) {
-        callback?.onPlayerMoved(id, posX, posY)
-    }
-
-    override fun onHealthChanged(id: Long, currentHp: Float, maxHp: Float) {}
-    override fun onFactionChanged(id: Long, faction: Int) {}
-    override fun onMountChanged(id: Long, isMounted: Boolean) {}
-    override fun onLocalPlayerPosition(id: Long, posX: Float, posY: Float) {
-        callback?.onLocalPlayerUpdate(id, posX, posY)
-    }
-
-    companion object {
-        private const val TAG = "AlbionVpnService"
+    private fun notifyUpdate(msg: String) {
+        onUpdate?.invoke(msg)
     }
 }
