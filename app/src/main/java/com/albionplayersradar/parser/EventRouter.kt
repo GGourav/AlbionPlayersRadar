@@ -1,38 +1,37 @@
 package com.albionplayersradar.parser
 
 import android.util.Log
-import java.nio.ByteBuffer
+import com.albionplayersradar.data.Player
 
 object EventRouter {
-    private const val TAG = "EventRouter"
-
-    interface PlayerListener {
-        fun onPlayerJoined(id: Long, name: String, guild: String, posX: Float, posY: Float, posZ: Float, faction: Int)
+    interface PlayerCallback {
+        fun onPlayerJoined(player: Player)
+        fun onPlayerMoved(player: Player)
         fun onPlayerLeft(id: Long)
-        fun onPlayerMoved(id: Long, posX: Float, posY: Float, posZ: Float)
-        fun onPlayerHealthChanged(id: Long, currentHp: Float, maxHp: Float)
-        fun onLocalPlayerJoined(id: Long, posX: Float, posY: Float, posZ: Float)
+        fun onPlayerHealth(id: Long, current: Float, max: Float)
+        fun onMountChanged(id: Long, mounted: Boolean)
+        fun onFactionChanged(id: Long, faction: Int)
+        fun onLocalPosition(x: Float, y: Float)
         fun onZoneChanged(zoneId: String)
     }
 
-    private var listener: PlayerListener? = null
-    private var localPlayerId: Long = -1
+    var listener: PlayerCallback? = null
+
+    private val players = mutableMapOf<Long, Player>()
+    private var localId: Long = -1
     private var localX: Float = 0f
     private var localY: Float = 0f
-    private var currentZone: String = ""
 
-    fun setPlayerListener(c: PlayerListener) { listener = c }
-
-    fun onUdpPacketReceived(data: ByteArray) {
-        PhotonPacketParser.parsePacket(data) { type, params ->
+    fun onPacket(data: ByteArray) {
+        PhotonPacketParser.parse(data) { type, params ->
             try {
                 when (type) {
                     "event" -> handleEvent(params)
-                    "response" -> handleResponse(params)
                     "request" -> handleRequest(params)
+                    "response" -> handleResponse(params)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "routing error", e)
+                Log.e("EventRouter", "error: ${e.message}")
             }
         }
     }
@@ -41,109 +40,126 @@ object EventRouter {
         val code = (params[252.toByte()] as? Number)?.toInt() ?: return
 
         when (code) {
-            1 -> { // Leave
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                if (id != localPlayerId) {
-                    listener?.onPlayerLeft(id)
-                }
-            }
-            29 -> { // NewCharacter / PlayerJoined
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                val name = params[1.toByte()] as? String ?: return
-                val guild = params[8.toByte()] as? String ?: ""
-                val faction = (params[53.toByte()] as? Number)?.toInt() ?: 0
+            29 -> handleNewCharacter(params)
+            3 -> handleMove(params)
+            6 -> handleHealth(params)
+            91 -> handleRegen(params)
+            209 -> handleMount(params)
+            359 -> handleFaction(params)
+            1 -> handleLeave(params)
+        }
+    }
 
-                // Position from param 7 (list of floats)
-                val locList = params[7.toByte()] as? List<*>
-                val posX = (locList?.getOrNull(0) as? Number)?.toFloat() ?: 0f
-                val posY = (locList?.getOrNull(1) as? Number)?.toFloat() ?: 0f
-                val posZ = (locList?.getOrNull(2) as? Number)?.toFloat() ?: 0f
+    private fun handleNewCharacter(params: Map<Byte, Any>) {
+        val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+        if (id == localId) return
+        val name = params[1.toByte()] as? String ?: return
+        val guild = params[8.toByte()] as? String
+        val alliance = params[51.toByte()] as? String
+        val faction = (params[53.toByte()] as? Number)?.toInt() ?: 0
 
-                if (id == localPlayerId) {
-                    localX = posX; localY = posY
-                    listener?.onLocalPlayerJoined(id, posX, posY, posZ)
-                } else {
-                    listener?.onPlayerJoined(id, name, guild, posX, posY, posZ, faction)
-                }
-            }
-            3 -> { // Move
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                if (id == localPlayerId) return
+        val loc = params[7.toByte()] as? List<*>
+        val posX = (loc?.get(0) as? Number)?.toFloat() ?: 0f
+        val posY = (loc?.get(1) as? Number)?.toFloat() ?: 0f
 
-                val posX = (params[4.toByte()] as? Number)?.toFloat() ?: 0f
-                val posY = (params[5.toByte()] as? Number)?.toFloat() ?: 0f
-                listener?.onPlayerMoved(id, posX, posY, 0f)
-            }
-            6 -> { // HealthUpdate
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                val cur = (params[2.toByte()] as? Number)?.toFloat() ?: 0f
-                val max = (params[3.toByte()] as? Number)?.toFloat() ?: 1f
-                listener?.onPlayerHealthChanged(id, cur, max)
-            }
-            91 -> { // RegenHealth
-                val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                val cur = (params[2.toByte()] as? Number)?.toFloat() ?: 0f
-                val max = (params[3.toByte()] as? Number)?.toFloat() ?: 1f
-                listener?.onPlayerHealthChanged(id, cur, max)
-            }
-            209 -> { // MountDismount — tracked in Player data class, not routed separately
-            }
-            359 -> { // FlagChange — tracked in Player data class, not routed separately
-            }
-            252 -> { // Internal event code passthrough, ignore
+        val player = Player(
+            id = id, name = name, guildName = guild, allianceName = alliance,
+            faction = faction, posX = posX, posY = posY, posZ = 0f,
+            currentHealth = 0, maxHealth = 0, isMounted = false
+        )
+        players[id] = player
+        listener?.onPlayerJoined(player)
+    }
+
+    private fun handleMove(params: Map<Byte, Any>) {
+        val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+        val posX = (params[4.toByte()] as? Number)?.toFloat() ?: return
+        val posY = (params[5.toByte()] as? Number)?.toFloat() ?: return
+
+        val player = players[id] ?: return
+        val updated = player.copy(posX = posX, posY = posY)
+        players[id] = updated
+        listener?.onPlayerMoved(updated)
+    }
+
+    private fun handleHealth(params: Map<Byte, Any>) {
+        val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+        val current = (params[2.toByte()] as? Number)?.toFloat() ?: return
+        val max = (params[3.toByte()] as? Number)?.toFloat() ?: 1f
+
+        val player = players[id]
+        if (player != null) {
+            players[id] = player.copy(currentHealth = current.toInt(), maxHealth = max.toInt())
+        }
+        listener?.onPlayerHealth(id, current, max)
+    }
+
+    private fun handleRegen(params: Map<Byte, Any>) {
+        handleHealth(params)
+    }
+
+    private fun handleMount(params: Map<Byte, Any>) {
+        val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+        val mounted = params[11.toByte()] == true || params[11.toByte()] == "true"
+        val player = players[id] ?: return
+        players[id] = player.copy(isMounted = mounted)
+        listener?.onMountChanged(id, mounted)
+    }
+
+    private fun handleFaction(params: Map<Byte, Any>) {
+        val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+        val faction = (params[1.toByte()] as? Number)?.toInt() ?: return
+        val player = players[id] ?: return
+        players[id] = player.copy(faction = faction)
+        listener?.onFactionChanged(id, faction)
+    }
+
+    private fun handleLeave(params: Map<Byte, Any>) {
+        val id = (params[0.toByte()] as? Number)?.toLong() ?: return
+        players.remove(id)
+        listener?.onPlayerLeft(id)
+    }
+
+    private fun handleRequest(params: Map<Byte, Any>) {
+        val opCode = (params[253.toByte()] as? Number)?.toInt() ?: return
+
+        if (opCode == 21 || opCode == 22) {
+            val pos = params[1.toByte()]
+            val list = pos as? List<*>
+            if (list != null && list.size >= 2) {
+                localX = (list[0] as? Number)?.toFloat() ?: 0f
+                localY = (list[1] as? Number)?.toFloat() ?: 0f
+                listener?.onLocalPosition(localX, localY)
             }
         }
     }
 
     private fun handleResponse(params: Map<Byte, Any>) {
-        val code = (params[253.toByte()] as? Number)?.toInt() ?: return
+        val opCode = (params[253.toByte()] as? Number)?.toInt() ?: return
 
-        when (code) {
-            2 -> { // JoinMap response — our local player info
+        when (opCode) {
+            2 -> {
                 val id = (params[0.toByte()] as? Number)?.toLong() ?: return
-                localPlayerId = id
-
-                // Position from param 9 (byte array with LE floats or list)
-                val posData = params[9.toByte()]
-                var posX = 0f
-                var posY = 0f
-
-                when (posData) {
-                    is ByteArray -> {
-                        if (posData.size >= 8) {
-                            val bb = ByteBuffer.wrap(posData).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-                            posX = bb.float
-                            posY = bb.float
-                        }
-                    }
-                    is List<*> -> {
-                        posX = (posData.getOrNull(0) as? Number)?.toFloat() ?: 0f
-                        posY = (posData.getOrNull(1) as? Number)?.toFloat() ?: 0f
-                    }
+                localId = id
+                val posArray = params[9.toByte()] as? ByteArray
+                if (posArray != null && posArray.size >= 8) {
+                    val buf = java.nio.ByteBuffer.wrap(posArray).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                    localX = buf.float
+                    localY = buf.float
+                    listener?.onLocalPosition(localX, localY)
                 }
-
-                localX = posX; localY = posY
-
-                // Zone from param 8
-                val zoneId = (params[8.toByte()] as? String) ?: ""
-                if (zoneId.isNotEmpty() && zoneId != currentZone) {
-                    currentZone = zoneId
+                val zoneId = params[8.toByte()] as? String
+                if (!zoneId.isNullOrEmpty()) {
                     listener?.onZoneChanged(zoneId)
                 }
-
-                listener?.onLocalPlayerJoined(id, posX, posY, 0f)
             }
-            35, 41 -> { // Cluster switch
+            35, 41 -> {
                 val zoneId = (params[0.toByte()] as? String) ?: return
-                if (zoneId != currentZone) {
-                    currentZone = zoneId
-                    listener?.onZoneChanged(zoneId)
-                }
+                listener?.onZoneChanged(zoneId)
             }
         }
     }
 
-    private fun handleRequest(params: Map<Byte, Any>) {
-        // Generally we don't act on outbound requests
-    }
+    fun getPlayers() = players.values.toList()
+    fun getLocalPosition() = localX to localY
 }
