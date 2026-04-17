@@ -12,12 +12,11 @@ import androidx.core.app.NotificationCompat
 import com.albionplayersradar.parser.EventRouter
 import com.albionplayersradar.ui.MainActivity
 import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
 
-class AlbionVpnService : VpnService(), EventRouter.PlayerListener {
+class AlbionVpnService : Service(), EventRouter.PlayerListener {
 
     private val binder = LocalBinder()
     private var running = false
@@ -62,13 +61,12 @@ class AlbionVpnService : VpnService(), EventRouter.PlayerListener {
             val prepared = VpnService.prepare(this)
             if (prepared != null) return
 
-            val builder = Builder()
+            val builder = VpnService.Builder()
             builder.setSession("AlbionPlayersRadar")
                 .addAddress("10.0.0.2", 32)
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("8.8.8.8")
                 .setMtu(1500)
-                .addAllowedApplication("com.albiononline")
 
             tunnelFd = builder.establish()
             if (tunnelFd == null) { stopSelf(); return }
@@ -90,15 +88,10 @@ class AlbionVpnService : VpnService(), EventRouter.PlayerListener {
 
             Thread {
                 val buf = ByteArray(4096)
-                val fos = FileOutputStream(tunnelFd!!.fileDescriptor)
                 while (running) {
                     try {
                         val pkt = DatagramPacket(buf, buf.size)
                         udpSocket?.receive(pkt)
-                        if (pkt.length > 0) {
-                            val resp = buildIpPacket(pkt.data, pkt.length)
-                            fos.write(resp)
-                        }
                     } catch (e: Exception) {
                         if (running) Log.e("VPN", "write: ${e.message}")
                     }
@@ -135,30 +128,6 @@ class AlbionVpnService : VpnService(), EventRouter.PlayerListener {
         } catch (e: Exception) {
             Log.e("VPN", "proxy: ${e.message}")
         }
-    }
-
-    private fun buildIpPacket(data: ByteArray, len: Int): ByteArray {
-        val srcIp = byteArrayOf(5, 45.toByte(), 187.toByte(), 219.toByte())
-        val dstIp = byteArrayOf(10, 0, 0, 2)
-        val srcPort = byteArrayOf((SERVER_PORT shr 8).toByte(), (SERVER_PORT and 0xFF).toByte())
-        val dstPort = byteArrayOf(data[2], data[3])
-        val totalLen = 20 + len
-
-        val ip = ByteArray(20 + len)
-        ip[0] = 0x45.toByte()
-        ip[1] = 0
-        ip[2] = (totalLen shr 8).toByte()
-        ip[3] = (totalLen and 0xFF).toByte()
-        ip[4] = 0; ip[5] = 0
-        ip[6] = 0x40.toByte(); ip[7] = 0
-        ip[8] = 64; ip[9] = 17
-        ip[10] = 0; ip[11] = 0
-        System.arraycopy(dstIp, 0, ip, 12, 4)
-        System.arraycopy(srcIp, 0, ip, 16, 4)
-        System.arraycopy(dstPort, 0, ip, 20, 2)
-        System.arraycopy(srcPort, 0, ip, 22, 2)
-        System.arraycopy(data, 0, ip, 24, len.coerceAtMost(data.size))
-        return ip
     }
 
     fun stopRun() {
