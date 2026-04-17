@@ -8,14 +8,14 @@ object PhotonPacketParser {
     private const val PACKET_HEADER_SIZE = 12
     private const val CMD_HEADER_SIZE = 12
 
-    private const val CMD_DISCONNECT = 4
-    private const val CMD_SEND_RELIABLE = 6
-    private const val CMD_SEND_UNRELIABLE = 7
-    private const val CMD_SEND_FRAGMENT = 8
+    private const val CMD_DISCONNECT: Byte = 4
+    private const val CMD_SEND_RELIABLE: Byte = 6
+    private const val CMD_SEND_UNRELIABLE: Byte = 7
+    private const val CMD_SEND_FRAGMENT: Byte = 8
 
-    private const val MSG_REQUEST = 2
-    private const val MSG_RESPONSE = 3
-    private const val MSG_EVENT = 4
+    private const val MSG_REQUEST: Byte = 2
+    private const val MSG_RESPONSE: Byte = 3
+    private const val MSG_EVENT: Byte = 4
 
     fun parse(data: ByteArray, callback: (type: String, params: Map<Byte, Any>) -> Unit) {
         if (data.size < PACKET_HEADER_SIZE) return
@@ -25,7 +25,7 @@ object PhotonPacketParser {
 
             while (buf.hasRemaining()) {
                 if (buf.remaining() < 4) break
-                val cmdType = buf.get().toInt()
+                val cmdType = buf.get()
                 buf.get()
                 buf.get()
                 buf.get()
@@ -35,8 +35,8 @@ object PhotonPacketParser {
                 val payloadLen = cmdLen - CMD_HEADER_SIZE
                 if (payloadLen <= 0 || payloadLen > buf.remaining()) break
 
-                when (cmdType) {
-                    CMD_DISCONNECT -> { buf.position(buf.position() + payloadLen) }
+                when (cmdType.toInt()) {
+                    CMD_DISCONNECT.toInt() -> { buf.position(buf.position() + payloadLen) }
                     CMD_SEND_RELIABLE -> {
                         buf.get()
                         parseReliable(buf, payloadLen - 1, callback)
@@ -45,19 +45,22 @@ object PhotonPacketParser {
                         buf.int
                         parseReliable(buf, payloadLen - 4, callback)
                     }
-                    CMD_SEND_FRAGMENT -> {
-                        parseFragment(buf, payloadLen, callback)
-                    }
+                    CMD_SEND_FRAGMENT -> { parseFragment(buf, payloadLen, callback) }
                     else -> { buf.position(buf.position() + payloadLen) }
                 }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "parse failed", e)
+            Log.e(TAG, "parsePacket failed", e)
         }
     }
 
     private val fragmentMap = mutableMapOf<Int, FragmentState>()
-    private data class FragmentState(val totalLen: Int, val payload: ByteArray, var written: Int = 0, val seen: MutableSet<Int> = mutableSetOf())
+    private data class FragmentState(
+        val totalLen: Int,
+        val payload: ByteArray,
+        var written: Int = 0,
+        val seen: MutableSet<Int> = mutableSetOf()
+    )
 
     private fun parseFragment(buf: ByteBuffer, len: Int, callback: (type: String, params: Map<Byte, Any>) -> Unit) {
         if (len < 20) return
@@ -87,10 +90,10 @@ object PhotonPacketParser {
     private fun parseReliable(buf: ByteBuffer, len: Int, callback: (type: String, params: Map<Byte, Any>) -> Unit) {
         if (len < 1) return
         buf.get()
-        val msgType = buf.get().toInt()
+        val msgType = buf.get()
 
-        when (msgType) {
-            MSG_EVENT -> {
+        when (msgType.toInt()) {
+            MSG_EVENT.toInt() -> {
                 val eventCode = buf.get().toInt() and 0xFF
                 val params = mutableMapOf<Byte, Any>()
                 val count = readUVariant(buf)
@@ -102,7 +105,7 @@ object PhotonPacketParser {
                 params[252.toByte()] = eventCode
                 callback("event", params)
             }
-            MSG_REQUEST -> {
+            MSG_REQUEST.toInt() -> {
                 val opCode = buf.get().toInt() and 0xFF
                 val params = mutableMapOf<Byte, Any>()
                 val count = readUVariant(buf)
@@ -114,7 +117,7 @@ object PhotonPacketParser {
                 params[253.toByte()] = opCode
                 callback("request", params)
             }
-            MSG_RESPONSE -> {
+            MSG_RESPONSE.toInt() -> {
                 val opCode = buf.get().toInt() and 0xFF
                 buf.short
                 val params = mutableMapOf<Byte, Any>()
