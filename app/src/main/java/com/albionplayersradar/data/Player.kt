@@ -9,29 +9,13 @@ data class Player(
     val posX: Float,
     val posY: Float,
     val posZ: Float,
-    val currentHealth: Float,
-    val maxHealth: Float,
+    val currentHealth: Int,
+    val maxHealth: Int,
     val isMounted: Boolean,
     val detectedAt: Long = System.currentTimeMillis()
 ) {
-    val healthPercent: Float
-        get() = if (maxHealth > 0) currentHealth / maxHealth else 0f
-
-    val isHostile: Boolean
-        get() = faction == 255
-
-    val isPassive: Boolean
-        get() = faction == 0
-
-    val isFactionPlayer: Boolean
-        get() = faction in 1..6
-
-    val threatLevel: ThreatLevel
-        get() = when {
-            isHostile -> ThreatLevel.HOSTILE
-            isFactionPlayer -> ThreatLevel.FACTION
-            else -> ThreatLevel.PASSIVE
-        }
+    val isHostile: Boolean get() = faction == 255
+    val isPassive: Boolean get() = faction == 0
+    val isFactionPlayer: Boolean get() = faction in 1..6
+    val healthPercent: Float get() = if (maxHealth > 0) currentHealth.toFloat() / maxHealth else 0f
 }
-
-enum class ThreatLevel { PASSIVE, FACTION, HOSTILE }
