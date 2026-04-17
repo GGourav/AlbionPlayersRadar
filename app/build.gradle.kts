@@ -20,6 +20,9 @@ android {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
+        debug {
+            isMinifyEnabled = false
+        }
     }
 
     compileOptions {
@@ -32,7 +35,7 @@ android {
     }
 
     buildFeatures {
-        viewBinding = true
+        viewBinding = false
     }
 }
 
