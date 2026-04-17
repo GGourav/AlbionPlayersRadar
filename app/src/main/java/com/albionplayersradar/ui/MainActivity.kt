@@ -1,7 +1,9 @@
 package com.albionplayersradar.ui
 
+import android.content.Intent
 import android.os.Bundle
 import android.widget.Button
+import android.widget.FrameLayout
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -11,7 +13,6 @@ import com.albionplayersradar.vpn.AlbionVpnService
 
 class MainActivity : AppCompatActivity() {
 
-    private var vpnService: AlbionVpnService? = null
     private var vpnBound = false
     private val players = mutableListOf<Player>()
     private var localX = 0f
@@ -27,15 +28,13 @@ class MainActivity : AppCompatActivity() {
 
     private val vpnConnection = object : android.content.ServiceConnection {
         override fun onServiceConnected(name: android.content.ComponentName?, binder: android.os.IBinder?) {
-            val b = binder as AlbionVpnService.LocalBinder
-            vpnService = b.getService()
             vpnBound = true
             setupVpnCallbacks()
-            updateStatus("Radar active")
+            updateStatus(true)
         }
         override fun onServiceDisconnected(name: android.content.ComponentName?) {
-            vpnService = null
             vpnBound = false
+            updateStatus(false)
         }
     }
 
@@ -54,10 +53,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleVpn() {
-        if (vpnService != null) stopVpn() else {
+        if (vpnBound) {
+            stopVpn()
+        } else {
             val intent = android.net.VpnService.prepare(this)
             if (intent != null) {
-                startActivityForResult(intent, 0)
+                @Suppress("DEPRECATION")
+                startActivityForResult(intent, VPN_REQUEST_CODE)
             } else {
                 startVpn()
             }
@@ -68,14 +70,19 @@ class MainActivity : AppCompatActivity() {
         val intent = Intent(this, AlbionVpnService::class.java)
         startForegroundService(intent)
         bindService(intent, vpnConnection, BIND_AUTO_CREATE)
-        updateStatus("Starting...")
+        tvStatus.text = "Starting..."
     }
 
     private fun stopVpn() {
-        if (vpnBound) { unbindService(vpnConnection); vpnBound = false }
+        if (vpnBound) {
+            unbindService(vpnConnection)
+            vpnBound = false
+        }
         stopService(Intent(this, AlbionVpnService::class.java))
-        vpnService = null
-        updateStatus("Tap START to activate")
+        AlbionVpnService.onUpdate = null
+        players.clear()
+        radarView.updateData(0f, 0f, emptyList(), "")
+        updateStatus(false)
     }
 
     private fun setupVpnCallbacks() {
@@ -91,17 +98,21 @@ class MainActivity : AppCompatActivity() {
                             val faction = p[3].toIntOrNull() ?: 0
                             val posX = p.getOrNull(4)?.toFloatOrNull() ?: 0f
                             val posY = p.getOrNull(5)?.toFloatOrNull() ?: 0f
-                            players.add(Player(id, name, guild, null, faction, posX, posY))
-                            tvCount.text = "Players: ${players.size}"
-                            addLog("→ $name [$guild]")
-                            radarView.updateData(localX, localY, players.toList(), currentZone)
+                            if (players.none { it.id == id }) {
+                                players.add(Player(id, name, guild, null, faction, posX, posY))
+                                tvCount.text = "Players: ${players.size}"
+                                addLog("→ $name [$guild]")
+                                radarView.updateData(localX, localY, players.toList(), currentZone)
+                            }
                         }
                     }
                     msg.startsWith("ZONE:") -> {
                         currentZone = msg.substringAfter("ZONE:")
                         tvZone.text = "Zone: $currentZone"
                         players.clear()
+                        tvCount.text = "Players: 0"
                         addLog("Zone: $currentZone")
+                        radarView.updateData(localX, localY, emptyList(), currentZone)
                     }
                     msg.startsWith("LOCAL:") -> {
                         val c = msg.substringAfter("LOCAL:").split("|")
@@ -118,7 +129,8 @@ class MainActivity : AppCompatActivity() {
                             val posX = p[1].toFloatOrNull() ?: 0f
                             val posY = p[2].toFloatOrNull() ?: 0f
                             players.find { it.id == id }?.let {
-                                it.posX = posX; it.posY = posY
+                                it.posX = posX
+                                it.posY = posY
                                 radarView.updateData(localX, localY, players.toList(), currentZone)
                             }
                         }
@@ -128,6 +140,27 @@ class MainActivity : AppCompatActivity() {
                         if (id != null) {
                             players.removeAll { it.id == id }
                             tvCount.text = "Players: ${players.size}"
+                            radarView.updateData(localX, localY, players.toList(), currentZone)
+                        }
+                    }
+                    msg.startsWith("HEALTH:") -> {
+                        val p = msg.substringAfter("HEALTH:").split("|")
+                        if (p.size >= 3) {
+                            val id = p[0].toLongOrNull() ?: return@runOnUiThread
+                            val cur = p[1].toIntOrNull() ?: 0
+                            val max = p[2].toIntOrNull() ?: 1
+                            players.find { it.id == id }?.let {
+                                it.currentHealth = cur
+                                it.maxHealth = max
+                            }
+                        }
+                    }
+                    msg.startsWith("MOUNT:") -> {
+                        val p = msg.substringAfter("MOUNT:").split("|")
+                        if (p.size >= 2) {
+                            val id = p[0].toLongOrNull() ?: return@runOnUiThread
+                            val mounted = p[1] == "true"
+                            players.find { it.id == id }?.isMounted = mounted
                         }
                     }
                 }
@@ -135,23 +168,35 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun updateStatus(text: String) {
-        tvStatus.text = text
-        btnVpn.text = if (vpnService != null) "STOP RADAR" else "START RADAR"
+    private fun updateStatus(running: Boolean) {
+        tvStatus.text = if (running) "Radar active" else "Tap START to activate"
+        btnVpn.text = if (running) "STOP RADAR" else "START RADAR"
     }
 
     private fun addLog(msg: String) {
         tvLog.text = "$msg\n${tvLog.text}".lines().take(20).joinToString("\n")
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+    @Deprecated("Using for VPN permission result")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        @Suppress("DEPRECATION")
         super.onActivityResult(requestCode, resultCode, data)
-        if (resultCode == RESULT_OK) startVpn()
-        else Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
+        if (requestCode == VPN_REQUEST_CODE) {
+            if (resultCode == RESULT_OK) startVpn()
+            else Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
+        }
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        if (vpnBound) { unbindService(vpnConnection); vpnBound = false }
+        if (vpnBound) {
+            unbindService(vpnConnection)
+            vpnBound = false
+        }
+        AlbionVpnService.onUpdate = null
+    }
+
+    companion object {
+        private const val VPN_REQUEST_CODE = 1001
     }
 }
