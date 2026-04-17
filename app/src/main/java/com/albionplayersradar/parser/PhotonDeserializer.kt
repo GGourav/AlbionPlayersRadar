@@ -69,8 +69,8 @@ object PhotonDeserializer {
             if (flags and 1 != 0) return ParseResult(events, requests, responses)
 
             var offset = 14
-            repeat(commandCount) {
-                if (offset + 12 > data.size) return@repeat
+            for (i in 0 until commandCount) {
+                if (offset + 12 > data.size) break
                 val cmdType = data[offset].toInt() and 0xFF
                 offset += 4
                 val cmdLen = intFromBytes(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
@@ -78,7 +78,7 @@ object PhotonDeserializer {
                 val seqNum = intFromBytes(data[offset], data[offset + 1], data[offset + 2], data[offset + 3])
                 offset += 4
                 val payloadLen = cmdLen - 12
-                if (payloadLen < 0 || offset + payloadLen > data.size) return@repeat
+                if (payloadLen < 0 || offset + payloadLen > data.size) break
 
                 when (cmdType) {
                     CMD_DISCONNECT -> { }
@@ -130,10 +130,10 @@ object PhotonDeserializer {
             val params = mutableMapOf<Int, Any>()
             var offset = 1
             val count = readUInt8(data, offset); offset++
-            repeat(count) {
-                if (offset >= data.size) return@repeat
+            for (i in 0 until count) {
+                if (offset >= data.size) break
                 val key = data[offset].toInt() and 0xFF; offset++
-                if (offset >= data.size) return@repeat
+                if (offset >= data.size) break
                 val (value, newOffset) = readValue(data, offset)
                 params[key] = value
                 offset = newOffset
@@ -149,10 +149,10 @@ object PhotonDeserializer {
             val params = mutableMapOf<Int, Any>()
             var offset = 1
             val count = readUInt8(data, offset); offset++
-            repeat(count) {
-                if (offset >= data.size) return@repeat
+            for (i in 0 until count) {
+                if (offset >= data.size) break
                 val key = data[offset].toInt() and 0xFF; offset++
-                if (offset >= data.size) return@repeat
+                if (offset >= data.size) break
                 val (value, newOffset) = readValue(data, offset)
                 params[key] = value
                 offset = newOffset
@@ -169,10 +169,10 @@ object PhotonDeserializer {
             val params = mutableMapOf<Int, Any>()
             var offset = 3
             val count = readUInt8(data, offset); offset++
-            repeat(count) {
-                if (offset >= data.size) return@repeat
+            for (i in 0 until count) {
+                if (offset >= data.size) break
                 val key = data[offset].toInt() and 0xFF; offset++
-                if (offset >= data.size) return@repeat
+                if (offset >= data.size) break
                 val (value, newOffset) = readValue(data, offset)
                 params[key] = value
                 offset = newOffset
@@ -236,10 +236,10 @@ object PhotonDeserializer {
                 val count = readUInt16(data, offset + 1)
                 val map = mutableMapOf<Any, Any>()
                 var p = offset + 3
-                repeat(count) {
-                    if (p >= data.size) return@repeat
+                for (i in 0 until count) {
+                    if (p >= data.size) break
                     val (key, p2) = readValue(data, p)
-                    if (p2 >= data.size) return@repeat
+                    if (p2 >= data.size) break
                     val (value, p3) = readValue(data, p2)
                     map[key] = value
                     p = p3
@@ -263,8 +263,8 @@ object PhotonDeserializer {
                     val len = readUInt16(data, offset + 1)
                     val list = mutableListOf<Any>()
                     var p = offset + 3
-                    repeat(len) {
-                        if (p >= data.size) return@repeat
+                    for (i in 0 until len) {
+                        if (p >= data.size) break
                         val (v, np) = readPrimitive(elemType, data, p)
                         list.add(v); p = np
                     }
