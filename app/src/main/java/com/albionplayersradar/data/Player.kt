@@ -8,22 +8,16 @@ data class Player(
     val faction: Int,
     var posX: Float = 0f,
     var posY: Float = 0f,
-    var posZ: Float = 0f,
-    var currentHealth: Int = 0,
-    var maxHealth: Int = 1,
+    var currentHealth: Int = 255,
+    var maxHealth: Int = 255,
     var isMounted: Boolean = false
 ) {
     val healthPercent: Float
-        get() = if (maxHealth > 0) currentHealth.toFloat() / maxHealth else 0f
+        get() = if (maxHealth > 0) currentHealth.toFloat() / maxHealth.toFloat() else 1f
 
-    val isHostile: Boolean
-        get() = faction == 255
-
-    val isPassive: Boolean
-        get() = faction == 0
-
-    val isFactionPlayer: Boolean
-        get() = faction in 1..6
+    val isHostile: Boolean get() = faction == 255
+    val isPassive: Boolean get() = faction == 0
+    val isFactionPlayer: Boolean get() = faction in 1..6
 
     val threatLevel: ThreatLevel
         get() = when {
