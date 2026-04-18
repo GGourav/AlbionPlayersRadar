@@ -8,7 +8,8 @@ import android.os.Build
 class MainApplication : Application() {
 
     companion object {
-        const val CHANNEL_ID = "albion_vpn_channel"
+        // Used by both MainApplication (creator) and AlbionVpnService (user)
+        const val CHANNEL_ID = "radar_channel"
     }
 
     override fun onCreate() {
@@ -24,7 +25,6 @@ class MainApplication : Application() {
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
                 description = getString(R.string.notification_channel_desc)
-                setShowBadge(false)
             }
             val manager = getSystemService(NotificationManager::class.java)
             manager.createNotificationChannel(channel)
