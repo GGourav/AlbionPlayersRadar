@@ -3,4 +3,12 @@
     <string name="app_name">Albion Players Radar</string>
     <string name="notification_channel_name">Albion Radar</string>
     <string name="notification_channel_desc">Shows when the radar VPN is active</string>
+
+    <!-- Zone names — must match keys in ZonesDatabase -->
+    <string name="zone_THESTONE">The Stone</string>
+    <string name="zone_CAERLEON">Caerleon</string>
+    <string name="zone_BRITAIN">Britain</string>
+    <string name="zone_MERLYN">Merlyn</string>
+    <string name="zone_MARCH">March</string>
+    <string name="zone_BLACKROCK">Blackrock</string>
 </resources>
