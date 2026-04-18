@@ -3,13 +3,16 @@ package com.albionplayersradar.ui
 import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.DashPathEffect
 import android.graphics.Paint
-import android.graphics.Typeface
+import android.graphics.Path
 import android.util.AttributeSet
 import android.view.View
 import com.albionplayersradar.data.Player
-import kotlin.math.sqrt
+import com.albionplayersradar.data.ThreatLevel
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.min
+import kotlin.math.sin
 
 class PlayerRendererView @JvmOverloads constructor(
     context: Context,
@@ -17,143 +20,108 @@ class PlayerRendererView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr) {
 
-    private var players = listOf<Player>()
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 28f
+    }
+    private val path = Path()
+
+    private val players = mutableListOf<Player>()
     private var localX = 0f
     private var localY = 0f
-    private var currentZone = ""
-    var scale = 3.5f
-        set(value) { field = value; invalidate() }
+    private var localAngle = 0f
+    private var scale = 1f
 
-    private val bgPaint = Paint().apply {
-        color = Color.parseColor("#CC1a1a2e")
-        style = Paint.Style.FILL
-    }
-    private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#44FFFFFF")
-        style = Paint.Style.STROKE
-        strokeWidth = 1.5f
-        pathEffect = DashPathEffect(floatArrayOf(6f, 6f), 0f)
-    }
-    private val localPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        style = Paint.Style.FILL
-    }
-    private val passivePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#00FF88")
-        style = Paint.Style.FILL
-    }
-    private val factionPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FFA500")
-        style = Paint.Style.FILL
-    }
-    private val hostilePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FF3333")
-        style = Paint.Style.FILL
-    }
-    private val hostileStrokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#FF0000")
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
-    }
-    private val namePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = 22f
-        textAlign = Paint.Align.CENTER
-        typeface = Typeface.MONOSPACE
-        setShadowLayer(3f, 0f, 1f, Color.BLACK)
-    }
-    private val healthBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.parseColor("#66000000")
-        style = Paint.Style.FILL
-    }
-    private val healthFgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-    }
-    private val crosshairPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
-        strokeWidth = 2f
+    private val threatColors = mapOf(
+        ThreatLevel.PASSIVE to Color.rgb(0, 200, 100),
+        ThreatLevel.FACTION to Color.rgb(255, 200, 0),
+        ThreatLevel.HOSTILE to Color.rgb(255, 60, 60)
+    )
+
+    fun updatePlayers(newPlayers: List<Player>, localPos: Pair<Float, Float>?, localAngle: Float) {
+        players.clear()
+        players.addAll(newPlayers)
+        localPos?.let { localX = it.first; localY = it.second }
+        this.localAngle = localAngle
+        scale = min(width, height).toFloat() / 100f
+        invalidate()
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        if (width == 0 || height == 0) return
+
         val cx = width / 2f
         val cy = height / 2f
-        val radarR = minOf(cx, cy) * 0.95f
 
-        // Background circle
-        canvas.drawCircle(cx, cy, radarR, bgPaint)
+        // Draw local player arrow
+        paint.color = Color.WHITE
+        paint.style = Paint.Style.FILL
+        drawArrow(canvas, cx, cy, localAngle, 20f, Color.WHITE)
 
-        // Range rings at 30, 60, 90 world units
-        for (r in listOf(30f, 60f, 90f)) {
-            val screenR = r * scale
-            if (screenR < radarR) canvas.drawCircle(cx, cy, screenR, ringPaint)
+        // Draw grid
+        paint.color = Color.argb(40, 255, 255, 255)
+        paint.style = Paint.Style.STROKE
+        paint.strokeWidth = 1f
+        for (i in -5..5) {
+            val pos = (min(width, height) / 2f) * i / 5f
+            canvas.drawLine(cx + pos, 0f, cx + pos, height.toFloat(), paint)
+            canvas.drawLine(0f, cy + pos, width.toFloat(), cy + pos, paint)
         }
 
-        // Players
-        for (p in players) {
-            val dx = (p.posX - localX) * scale
-            val dy = -(p.posY - localY) * scale  // Y flipped
+        // Draw players
+        for (player in players) {
+            val dx = (player.posX - localX) * scale
+            val dy = -(player.posY - localY) * scale  // Y is inverted
             val px = cx + dx
             val py = cy + dy
 
-            val dist = sqrt(dx * dx + dy * dy)
-            if (dist > radarR + 10) continue
+            if (px < -50 || px > width + 50 || py < -50 || py > height + 50) continue
 
-            val dotPaint = when {
-                p.isHostile -> hostilePaint
-                p.isFactionPlayer -> factionPaint
-                else -> passivePaint
-            }
-            val dotR = if (p.isHostile) 14f else 10f
+            val color = threatColors[player.threat] ?: Color.WHITE
+            paint.color = color
+            paint.style = Paint.Style.FILL
 
-            canvas.drawCircle(px, py, dotR, dotPaint)
-            if (p.isHostile) canvas.drawCircle(px, py, dotR, hostileStrokePaint)
-
-            // Health bar
-            if (p.maxHealth > 0) {
-                val barW = dotR * 2.5f
-                val barH = 4f
-                val barL = px - barW / 2
-                val barT = py + dotR + 3f
-                canvas.drawRect(barL, barT, barL + barW, barT + barH, healthBgPaint)
-                val hpFraction = p.healthPercent.coerceIn(0f, 1f)
-                healthFgPaint.color = when {
-                    hpFraction > 0.6f -> Color.parseColor("#00FF88")
-                    hpFraction > 0.3f -> Color.parseColor("#FFD700")
-                    else -> Color.parseColor("#FF4444")
-                }
-                canvas.drawRect(barL, barT, barL + barW * hpFraction, barT + barH, healthFgPaint)
+            // Calculate direction angle from movement delta
+            val angle = if (player.deltaX != 0f || player.deltaY != 0f) {
+                atan2(-player.deltaY, player.deltaX)  // negated deltaY because screen Y is inverted
+            } else {
+                0f
             }
 
-            // Name label (only when close enough)
-            if (dist < 80f * scale) {
-                val label = buildString {
-                    if (!p.guildName.isNullOrEmpty()) append("[${p.guildName.take(6)}] ")
-                    append(p.name.take(12))
-                    if (p.isMounted) append(" 🐴")
-                }
-                namePaint.color = when {
-                    p.isHostile -> Color.parseColor("#FF8080")
-                    p.isFactionPlayer -> Color.parseColor("#FFD080")
-                    else -> Color.parseColor("#80FF80")
-                }
-                canvas.drawText(label, px, py - dotR - 6f, namePaint)
+            val size = 12f
+            drawArrow(canvas, px, py, angle, size, color)
+
+            // Draw name
+            canvas.drawText(player.name, px + 14, py + 8, textPaint.apply { this.color = color })
+            if (player.guild.isNotEmpty()) {
+                canvas.drawText("[${player.guild}]", px + 14, py + 36,
+                    textPaint.apply { this.color = Color.argb(180, 255, 255, 255) })
             }
         }
-
-        // Crosshair for local player
-        val ch = 12f
-        canvas.drawLine(cx - ch, cy, cx + ch, cy, crosshairPaint)
-        canvas.drawLine(cx, cy - ch, cx, cy + ch, crosshairPaint)
-        canvas.drawCircle(cx, cy, 4f, localPaint)
     }
 
-    fun updateData(locX: Float, locY: Float, playerList: List<Player>, zone: String) {
-        localX = locX
-        localY = locY
-        players = playerList
-        currentZone = zone
-        invalidate()
+    private fun drawArrow(canvas: Canvas, x: Float, y: Float, angleRad: Float, size: Float, color: Int) {
+        paint.color = color
+        path.reset()
+        path.moveTo(
+            x + size * cos(angleRad),
+            y - size * sin(angleRad)  // negated for screen Y inversion
+        )
+        path.lineTo(
+            x + size * 0.6f * cos(angleRad + 2.5f),
+            y - size * 0.6f * sin(angleRad + 2.5f)
+        )
+        path.lineTo(
+            x + size * 0.4f * cos(angleRad),
+            y - size * 0.4f * sin(angleRad)
+        )
+        path.lineTo(
+            x + size * 0.6f * cos(angleRad - 2.5f),
+            y - size * 0.6f * sin(angleRad - 2.5f)
+        )
+        path.close()
+        canvas.drawPath(path, paint)
     }
 }
