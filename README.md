@@ -1,4 +1,4 @@
-# AlbionPlayersRadar
+# AlbionPlayersRadar 
 
 Real-time Albion Online player detection Android app using VPN-based network capture.
 
